@@ -49,13 +49,31 @@ class FiltersTest(ApprenticeTestCase):
         self.assertFalse(filters.classify("> a\n> b\nthoughts")["pasted"])
 
     def test_rule5_code_fence(self):
-        self.assertTrue(filters.classify("look\n```\ncode\n```")["pasted"])
+        self.assertTrue(filters.classify("look\n```\ncode\n```\nmore\n```")["pasted"])
+        self.assertFalse(filters.classify("look\n```\ncode\n```")["pasted"])
 
     def test_rule5_stack_trace(self):
-        self.assertTrue(filters.classify("err\n    at foo (x.js:1)")["pasted"])
-        self.assertTrue(filters.classify('err\n  File "x.py", line 1')["pasted"])
-        self.assertTrue(filters.classify("Traceback (most recent call last):")["pasted"])
+        self.assertTrue(filters.classify(
+            "err\n    at foo (x.js:1)\n    at bar (y.js:2)\n    at baz (z.js:3)")["pasted"])
+        self.assertTrue(filters.classify(
+            'Traceback (most recent call last):\n  File "x.py", line 1\n  File "y.py", line 2'
+        )["pasted"])
+        self.assertFalse(filters.classify("Traceback (most recent call last):")["pasted"])
         self.assertFalse(filters.classify("look at that")["pasted"])
+
+    def test_rule5_mixed_lines_count_together(self):
+        self.assertTrue(filters.classify("> quoted\n```\n    at foo (x.js:1)")["pasted"])
+
+    def test_rule5_single_matches_not_pasted(self):
+        for text in ("use ```git rebase``` here, why did we not?",
+                     "the build broke\n\nat least the tests pass, add one more",
+                     "why does it fail?\nTraceback is in the log",
+                     "check this:\n  at the moment it is slow"):
+            self.assertFalse(filters.classify(text)["pasted"], text)
+
+    def test_rule5_blank_lines_do_not_count_as_frames(self):
+        text = "a\n\nat one\n\nat two\n\nat three"
+        self.assertFalse(filters.classify(text)["pasted"])
 
     def test_rule6_ack_register(self):
         result = filters.classify("continue")

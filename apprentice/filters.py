@@ -13,8 +13,8 @@ _DROP_PREFIXES = (
 )
 _COMMAND_RE = re.compile(r"^/[\w:.-]+$")
 _IMAGE_ONLY_RE = re.compile(r"^\[Image #\d+\]\W*$")
-_QUOTE_LINE_RE = re.compile(r"^>", re.MULTILINE)
-_PASTE_SHAPE_RE = re.compile(r"```|^\s+at |^\s*File \"|^Traceback", re.MULTILINE)
+_PASTE_LINE_RE = re.compile(r"(?:>|```|[ \t]+at |[ \t]*File \"|Traceback)")
+_PASTE_LINES = 3
 _ACK_RE = re.compile(r"^(continue|go on|resume|retry|go|yep|yes|ok|sure|post|approve)\W*$",
                      re.IGNORECASE)
 
@@ -43,6 +43,10 @@ def _sha1(text: str) -> str:
 
 def normalized_sha1(text: str) -> str:
     return _sha1(" ".join(text.lower().split()))
+
+
+def _paste_lines(text: str) -> int:
+    return sum(1 for line in text.splitlines() if _PASTE_LINE_RE.match(line))
 
 
 def _result(outcome: str, text: str, stored: Optional[str], **extra) -> Dict:
@@ -102,8 +106,7 @@ def classify(text: str) -> Dict:
         return _result("machine", text, None, command=command)
     if _IMAGE_ONLY_RE.match(text):
         return _result("prompt", text, None, tags=["image_only"], image_only=True)
-    pasted = (len(text) > LONG_TEXT or len(_QUOTE_LINE_RE.findall(text)) >= 3
-              or bool(_PASTE_SHAPE_RE.search(text)))
+    pasted = len(text) > LONG_TEXT or _paste_lines(text) >= _PASTE_LINES
     if not pasted and _ACK_RE.match(text):
         return _result("prompt", text, text[:TEXT_CAP], register="ack")
     tags = _tags(text[:80].lower())
