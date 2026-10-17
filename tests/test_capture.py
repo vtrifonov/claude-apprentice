@@ -181,6 +181,21 @@ class CaptureTest(ApprenticeTestCase):
         self.run_hook("user-prompt", self.payload("user_prompt", prompt=text))
         self.assertEqual(self.records()[-1]["duplicate_of"], near)
 
+    def test_duplicate_of_cut_text_requires_raw_sha1(self):
+        head = "Traceback (most recent call last):\n" + "".join(
+            '  File "/srv/acme/widgets/mod%02d.py", line %d, in run\n' % (i, i) for i in range(12))
+        self.assertGreater(len(head), 300)
+        first = head + "ValueError: bad widget size\n"
+        second = head + "KeyError: missing cache entry\n"
+        self.run_hook("user-prompt", self.payload("user_prompt", prompt=first, session_id="sess-2"))
+        self.run_hook("user-prompt", self.payload("user_prompt", prompt=second))
+        earlier, later = self.records()
+        self.assertIn("pasted", later["tags"])
+        self.assertEqual(earlier["text"], later["text"])
+        self.assertIsNone(later["duplicate_of"])
+        self.run_hook("user-prompt", self.payload("user_prompt", prompt=first, session_id="sess-3"))
+        self.assertEqual(self.records()[-1]["duplicate_of"], earlier["id"])
+
     def test_duplicate_of_too_old_is_none(self):
         self.seed_prompt("Please add a widget cache", "sess-2", 200)
         self.run_hook("user-prompt", self.payload("user_prompt"))

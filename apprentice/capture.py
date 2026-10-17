@@ -207,15 +207,26 @@ def _check_rejected(payload: dict, env: Mapping, home_dir: str, cfg: dict, entry
     return True
 
 
-def _duplicate_of(text: Optional[str], session_id, recent: List[dict], now: datetime.datetime) -> Optional[str]:
+def _text_was_cut(event: dict) -> bool:
+    tags = event.get("tags")
+    length = event.get("len")
+    return (isinstance(tags, list) and "pasted" in tags) or (isinstance(length, int) and length > filters.TEXT_CAP)
+
+
+def _duplicate_of(record: dict, recent: List[dict], now: datetime.datetime) -> Optional[str]:
+    text = record.get("text")
     if text is None:
         return None
     wanted = filters.normalized_sha1(text)
+    cut = _text_was_cut(record)
     for event in reversed(recent):
-        if event.get("kind") != "prompt" or event.get("session_id") == session_id:
+        if event.get("kind") != "prompt" or event.get("session_id") == record.get("session_id"):
             continue
         other = event.get("text")
         if not isinstance(other, str) or filters.normalized_sha1(other) != wanted:
+            continue
+        # stored text is a lossy view once cut, so only the raw full-text hash can confirm a match
+        if (cut or _text_was_cut(event)) and event.get("sha1") != record.get("sha1"):
             continue
         age = _age_seconds(event.get("ts"), now)
         if age is not None and abs(age) <= DUPLICATE_WINDOW_SECONDS:
@@ -259,8 +270,8 @@ def handle_user_prompt(payload: dict, env: Mapping, home_dir: str, cfg: dict) ->
         "after_interrupt": tail["after_interrupt"],
         "after_rejected_ask": after_rejected,
         "prev_assistant": tail["prev_assistant"],
-        "duplicate_of": _duplicate_of(text, record["session_id"], recent, now),
     })
+    record["duplicate_of"] = _duplicate_of(record, recent, now)
     events.append_event(home_dir, record)
     return None
 

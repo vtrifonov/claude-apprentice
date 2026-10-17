@@ -118,7 +118,7 @@ A user prompt.
 | `after_interrupt` | bool | no | both | Follows an interrupted turn. |
 | `after_rejected_ask` | bool | no | both | Follows a rejected AskUserQuestion. |
 | `prev_assistant` | string | yes | both | Scrubbed anchor of the previous assistant message, at most 400 chars. |
-| `duplicate_of` | string | yes | both | `id` of an earlier `prompt` with the same normalized sha1 (lowercased, whitespace collapsed) from a **different session** within 120 s. |
+| `duplicate_of` | string | yes | both | `id` of an earlier `prompt` with the same normalized sha1 (lowercased, whitespace collapsed) from a **different session** within 120 s. When either stored `text` was cut (`pasted`, or `len` over 4,000), the raw `sha1` must match as well. |
 
 ## Payload: `machine`
 
