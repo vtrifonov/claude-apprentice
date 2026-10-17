@@ -6,7 +6,7 @@ import os
 import re
 from typing import List, Mapping, Optional, Tuple
 
-from apprentice import asks, config, events, filters, transcript
+from apprentice import asks, config, events, filters, transcript, worktrees
 from apprentice.scrub import scrub
 
 MARKER_CAP = 16384
@@ -265,9 +265,88 @@ def handle_user_prompt(payload: dict, env: Mapping, home_dir: str, cfg: dict) ->
     return None
 
 
+_ERROR_LOG_MAX = 262144
+_ERROR_LOG_KEEP = 131072
+_MARKER_MAX_AGE = 3600
+
+
+def _utc_month_index() -> int:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return now.year * 12 + now.month - 1
+
+
+def _prune_events(home_dir: str, retention_months: int) -> None:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    current = os.path.join(home_dir, "events", "%04d-%02d.jsonl" % (now.year, now.month))
+    if not os.path.exists(current):
+        fd = os.open(current, os.O_WRONLY | os.O_CREAT, 0o600)
+        os.close(fd)
+    if retention_months <= 0:
+        return
+    cutoff = _utc_month_index() - retention_months
+    for path in events.month_files(home_dir):
+        name = os.path.basename(path)
+        index = int(name[:4]) * 12 + int(name[5:7]) - 1
+        if index < cutoff:
+            _remove(path)
+
+
+def _truncate_error_log(home_dir: str) -> None:
+    path = os.path.join(home_dir, "hook-errors.log")
+    try:
+        if os.path.getsize(path) <= _ERROR_LOG_MAX:
+            return
+        with open(path, "rb") as fh:
+            fh.seek(-_ERROR_LOG_KEEP, os.SEEK_END)
+            tail = fh.read()
+    except OSError:
+        return
+    cut = tail.find(b"\n")
+    _write_atomic(path, tail[cut + 1:] if cut >= 0 else b"")
+
+
+def _prune_markers(home_dir: str) -> None:
+    folder = os.path.join(home_dir, "state", "pending-ask")
+    limit = datetime.datetime.now().timestamp() - _MARKER_MAX_AGE
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(folder, name)
+        try:
+            if os.stat(path).st_mtime < limit:
+                _remove(path)
+        except OSError:
+            continue
+
+
 def handle_session_start(payload: dict, env: Mapping, home_dir: str, cfg: dict) -> Optional[str]:
     config.ensure_dirs(home_dir)
-    return None
+    _prune_events(home_dir, cfg["retention_months"])
+    _truncate_error_log(home_dir)
+    _prune_markers(home_dir)
+    plugin_root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    _write_atomic(os.path.join(home_dir, "state", "plugin-root"), plugin_root.encode("utf-8"))
+    cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) and payload.get("cwd") else os.getcwd()
+    status, content = worktrees.ensure_link(cwd)
+    group = config.group_of_profile(config.current_profile(env), cfg, config.read_group_labels(home_dir))
+    tone_path = None
+    if group is not None:
+        candidate = os.path.join(home_dir, "profile", "tone-%s.md" % config.group_slug(group))
+        if os.path.isfile(candidate):
+            tone_path = candidate
+    info = {"ts": config.utc_now_iso(), "cwd": cwd, "is_worktree": worktrees.is_worktree(cwd),
+            "link": status, "group": group, "tone_line": tone_path is not None}
+    _write_atomic(os.path.join(home_dir, "state", "last-sessionstart.json"), json.dumps(info).encode("utf-8"))
+    out = ""
+    if status == "created" and content is not None:
+        out += "Personal repo rules from CLAUDE.local.md (linked by apprentice):\n%s\n" % content
+    if tone_path is not None:
+        out += "apprentice tone file for this session (account group %s): %s\n" % (group, tone_path)
+    return out or None
 
 
 _HANDLERS = {
