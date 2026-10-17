@@ -1,0 +1,2 @@
+{"type": "user", "timestamp": "2030-01-05T10:00:00Z", "sessionId": "sess-1", "cwd": "/home/alice/code/acme/widgets", "message": {"role": "user", "content": "[Image #1] why does this layout break"}}
+{"type": "assistant", "timestamp": "2030-01-05T10:00:01Z", "sessionId": "sess-1", "cwd": "/home/alice/code/acme/widgets", "message": {"role": "assistant", "content": [{"type": "text", "text": "The grid collapses."}]}}

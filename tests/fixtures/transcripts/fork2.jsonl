@@ -1,0 +1,2 @@
+{"type": "user", "timestamp": "2030-01-05T10:00:30Z", "sessionId": "sess-fork-b", "cwd": "/home/alice/code/acme/widgets", "message": {"role": "user", "content": "Investigate the flaky widget test"}}
+{"type": "assistant", "timestamp": "2030-01-05T10:00:31Z", "sessionId": "sess-fork-b", "cwd": "/home/alice/code/acme/widgets", "message": {"role": "assistant", "content": [{"type": "text", "text": "Looking into it."}]}}

@@ -1,0 +1,7 @@
+{
+  "session_id": "sess-1",
+  "transcript_path": "__TRANSCRIPT__",
+  "cwd": "/home/alice/code/acme/widgets",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "Please add a widget cache"
+}

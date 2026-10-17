@@ -1,0 +1,2 @@
+{"type": "user", "timestamp": "2030-01-05T10:00:00Z", "sessionId": "sess-1", "cwd": "/home/alice/code/acme/widgets", "message": {"role": "user", "content": "TypeError: widget is undefined\n  at render (widget.js:10)\n  at mount (widget.js:20)\n  at run (app.js:5)\n  at main (app.js:1)"}}
+{"type": "assistant", "timestamp": "2030-01-05T10:00:01Z", "sessionId": "sess-1", "cwd": "/home/alice/code/acme/widgets", "message": {"role": "assistant", "content": [{"type": "text", "text": "That trace points at render."}]}}

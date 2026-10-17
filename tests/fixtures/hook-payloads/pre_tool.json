@@ -1,0 +1,26 @@
+{
+  "session_id": "sess-1",
+  "transcript_path": "__TRANSCRIPT__",
+  "cwd": "/home/alice/code/acme/widgets",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "AskUserQuestion",
+  "tool_input": {
+    "questions": [
+      {
+        "header": "Mode",
+        "question": "Quick mode? XX-123 is a 2-value change that trips the deploy trigger",
+        "multiSelect": false,
+        "options": [
+          {
+            "label": "Quick (Recommended)",
+            "description": "option quick (recommended)"
+          },
+          {
+            "label": "Full",
+            "description": "option full"
+          }
+        ]
+      }
+    ]
+  }
+}

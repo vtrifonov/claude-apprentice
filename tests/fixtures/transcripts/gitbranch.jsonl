@@ -1,0 +1,3 @@
+{"type": "user", "timestamp": "2030-01-05T10:00:00Z", "sessionId": "sess-1", "cwd": "/home/alice/code/acme/widgets", "message": {"role": "user", "content": "Start the work"}, "gitBranch": "feat/XX-123-x"}
+{"type": "assistant", "timestamp": "2030-01-05T10:00:01Z", "sessionId": "sess-1", "cwd": "/home/alice/code/acme/widgets", "message": {"role": "assistant", "content": [{"type": "text", "text": "On it."}]}, "gitBranch": "feat/XX-123-x"}
+{"type": "user", "timestamp": "2030-01-05T10:00:02Z", "sessionId": "sess-1", "cwd": "/home/alice/code/acme/widgets", "message": {"role": "user", "content": "Add a test"}, "gitBranch": "feat/XX-123-x"}
