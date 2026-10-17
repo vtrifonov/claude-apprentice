@@ -13,6 +13,7 @@ _HEX_KEYWORD_RE = re.compile(r"token|key|secret", re.IGNORECASE)
 _HEX_WINDOW = 20
 _PAN_RE = re.compile(r"\b(?:\d[ -]?){13,19}\b")
 _IBAN_RE = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9 ]{11,30}\b")
+_IBAN_HEAD_RE = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9 ]*$")
 
 # (kind, regex, replacement) for the plain substitution rows, in spec order.
 _SIMPLE_BEFORE_HEX = [
@@ -28,10 +29,15 @@ _SIMPLE_BEFORE_HEX = [
     ("slack-token", re.compile(r"xox[bp]-[A-Za-z0-9-]{10,}"), "<redacted:slack-token>"),
     ("jwt", re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
      "<redacted:jwt>"),
-    ("bearer", re.compile(r"Bearer\s+[A-Za-z0-9._~+/=-]{16,}"), "Bearer <redacted>"),
+    ("bearer", re.compile(r"\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{16,}", re.IGNORECASE),
+     r"\1 <redacted>"),
     ("url-credentials", re.compile(r"([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@"), r"\1<redacted>@"),
-    ("assignment", re.compile(r"\b(password|passwd|pwd|secret|token|api[_-]?key)\s*[:=]\s*\S+",
-                              re.IGNORECASE), r"\1=<redacted>"),
+    # Prefixed or suffixed names (DB_PASSWORD, AWS_SECRET_ACCESS_KEY) and quoted JSON keys
+    # count too; over-redaction beats a leak.
+    ("assignment", re.compile(
+        r"(?<![A-Za-z0-9])([A-Za-z0-9_.-]*?(?:password|passwd|pwd|secret|token|api[_-]?key)"
+        r"[A-Za-z0-9_.-]*)"
+        r"([\"']?\s*[:=]\s*[\"']?)[^\s\"',}]+", re.IGNORECASE), r"\1\2<redacted>"),
 ]
 
 
@@ -67,15 +73,51 @@ def _hex_repl(match) -> str:
     return match.group(0)
 
 
+def _pan_ok(digits: str) -> bool:
+    return 13 <= len(digits) <= 19 and luhn_ok(digits)
+
+
 def _pan_repl(match) -> str:
-    digits = re.sub(r"\D", "", match.group(0))
-    if 13 <= len(digits) <= 19 and luhn_ok(digits):
+    span = match.group(0)
+    if _pan_ok(re.sub(r"\D", "", span)):
         return "<redacted:pan>"
-    return match.group(0)
+    if _IBAN_HEAD_RE.search(match.string, 0, match.start()):
+        return span  # digits inside an IBAN are left to the IBAN rule
+    # The greedy span failed; try runs of whole digit groups, longest first, so a
+    # card number followed or preceded by CVV or expiry digits is still caught.
+    # Card groups are 4+ digits (the last may be 3), which keeps lists of small
+    # numbers from producing Luhn hits by chance.
+    groups = [(g.start(), g.end()) for g in re.finditer(r"\d+", span)]
+    sizes = [end - start for start, end in groups]
+    windows = []
+    for i in range(len(groups)):
+        for j in range(i, len(groups)):
+            if any(n < 4 for n in sizes[i:j]) or sizes[j] < 3:
+                continue
+            digits = re.sub(r"\D", "", span[groups[i][0]:groups[j][1]])
+            if 13 <= len(digits) <= 19:
+                windows.append((-len(digits), i, j))
+    for _, i, j in sorted(windows):
+        start, end = groups[i][0], groups[j][1]
+        if _pan_ok(re.sub(r"\D", "", span[start:end])):
+            return span[:start] + "<redacted:pan>" + span[end:]
+    return span
 
 
 def _iban_repl(match) -> str:
-    return "<redacted:iban>" if iban_ok(match.group(0)) else match.group(0)
+    span = match.group(0)
+    body = span.rstrip()
+    tail = span[len(body):]
+    if iban_ok(body):
+        return "<redacted:iban>" + tail
+    # Shrink at space boundaries so trailing words or digits do not hide a valid IBAN.
+    cut = body.rfind(" ")
+    while cut > 0:
+        body = body[:cut].rstrip()
+        if iban_ok(body):
+            return "<redacted:iban>" + span[len(body):]
+        cut = body.rfind(" ")
+    return span
 
 
 def _extra_patterns(cfg: Optional[dict]) -> list:

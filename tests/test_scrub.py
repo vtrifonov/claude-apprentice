@@ -121,6 +121,16 @@ class ScrubKindsTest(ApprenticeTestCase):
         out = self.assertRedacted("Authorization: Bearer " + "a" * 20, "bearer", "Bearer <redacted>")
         self.assertNotIn("a" * 20, out)
 
+    def test_bearer_lowercase(self):
+        tok = "abcdefghij" + "0123456789"
+        out = self.assertRedacted("Authorization: bear" + "er " + tok, "bearer", "bearer <redacted>")
+        self.assertNotIn(tok, out)
+
+    def test_basic_auth(self):
+        tok = "dXNlcjpwYXNz" + "d29yZDEyMzQ1Ng=="
+        out = self.assertRedacted("Authorization: Ba" + "sic " + tok, "bearer", "Basic <redacted>")
+        self.assertNotIn(tok, out)
+
     def test_bearer_short_kept(self):
         self.assertKept("Bearer abc")
 
@@ -136,7 +146,7 @@ class ScrubKindsTest(ApprenticeTestCase):
 
     # assignment
     def test_assignment_colon(self):
-        out = self.assertRedacted("Password: hunter2 ok", "assignment", "Password=<redacted>", "ok")
+        out = self.assertRedacted("Password: hunter2 ok", "assignment", "Password: <redacted>", "ok")
         self.assertNotIn("hunter2", out)
 
     def test_assignment_equals_api_key(self):
@@ -145,6 +155,25 @@ class ScrubKindsTest(ApprenticeTestCase):
 
     def test_assignment_word_without_value_kept(self):
         self.assertKept("the password policy and token budget")
+
+    def test_assignment_prose_kept(self):
+        self.assertKept("the token limit is high")
+
+    def test_assignment_prefixed_env_names(self):
+        for key, value in (("DB_" + "PASSWORD", "hunter2hunter2"),
+                           ("AWS_SECRET_" + "ACCESS_KEY", "wJalrXUtnFEMI" + "K7MDENGbPxRfiCYEXAMPLEKEY"),
+                           ("client_" + "secret", "abcDEF123ghiJKL456")):
+            out = self.assertRedacted(key + "=" + value + " next", "assignment",
+                                      key + "=<redacted>", " next")
+            self.assertNotIn(value, out)
+
+    def test_assignment_json_forms(self):
+        pw = '{"pass' + 'word": "hunter2hunter2"}'
+        out = self.assertRedacted(pw, "assignment", '"password": "<redacted>"')
+        self.assertNotIn("hunter2", out)
+        key = '{"api_' + 'key": "abcd1234abcd1234", "x": 1}'
+        out = self.assertRedacted(key, "assignment", '"api_key": "<redacted>"', '"x": 1')
+        self.assertNotIn("abcd1234", out)
 
     # hex
     def test_hex_near_keyword(self):
@@ -173,6 +202,21 @@ class ScrubKindsTest(ApprenticeTestCase):
     def test_pan_short_digits_kept(self):
         self.assertKept("order 1234567890")
 
+    def test_pan_followed_by_cvv(self):
+        out = self.assertRedacted("card 4111 1111 1111 1111 123 thanks", "pan", "<redacted:pan>")
+        self.assertEqual(out, "card <redacted:pan> 123 thanks")
+
+    def test_pan_compact_followed_by_digits(self):
+        out = self.assertRedacted("card 4111111111111111 12", "pan", "<redacted:pan>")
+        self.assertEqual(out, "card <redacted:pan> 12")
+
+    def test_pan_preceded_by_digits(self):
+        out = self.assertRedacted("exp 12 4111 1111 1111 1111", "pan", "<redacted:pan>")
+        self.assertEqual(out, "exp 12 <redacted:pan>")
+
+    def test_lists_of_small_numbers_kept(self):
+        self.assertKept(" ".join("%03d" % i for i in range(190, 300)))
+
     def test_16_digits_failing_luhn_kept(self):
         self.assertKept("4111 1111 1111 1112")
 
@@ -183,6 +227,12 @@ class ScrubKindsTest(ApprenticeTestCase):
 
     def test_iban_compact(self):
         self.assertRedacted("pay GB82WEST12345698765432", "iban", "<redacted:iban>")
+
+    def test_iban_followed_by_capitals(self):
+        out, flags = scrub("pay DE89 3704 0044 0532 0130 00 ASAP")
+        self.assertEqual(out, "pay <redacted:iban> ASAP")
+        self.assertIn("redacted:iban", flags)
+        self.assertNotIn("redacted:pan", flags)
 
     def test_iban_shape_failing_mod97_kept(self):
         self.assertKept("pay GB82WEST12345698765433")
