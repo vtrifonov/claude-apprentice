@@ -47,7 +47,7 @@ def _question(text="Pick one?", desc="why", answer=True):
 
 
 def _signals():
-    return {"numbers": [], "numbers_other": [], "reset_at": None, "risk_words": [], "risk_words_negated": [],
+    return {"numbers": {}, "numbers_other": [], "reset_at": None, "risk_words": [], "risk_words_negated": [],
             "hour_local": 10, "weekday": 2}
 
 
@@ -274,6 +274,15 @@ class EventsTest(ApprenticeTestCase):
         missing = sorted(k for k in every if "`%s`" % k not in doc)
         self.assertEqual(missing, [])
         self.assertIn("v1 — 2026-10-17", doc)
+        rows = {}
+        for line in doc.splitlines():
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            if len(cells) == 5 and cells[0].startswith("`"):
+                rows.setdefault(cells[0].strip("`"), cells)
+        self.assertTrue(rows["numbers"][1].startswith("object"))
+        self.assertEqual(rows["numbers_other"][1], "list of number")
+        self.assertEqual(rows["text"][2], "yes")
+        self.assertIn("image_only", rows["text"][4])
 
     def test_concurrent_appends_no_loss(self):
         path = os.path.join(self.home, "events", "2026-10.jsonl")
