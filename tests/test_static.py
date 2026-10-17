@@ -171,7 +171,8 @@ class StaticGateTest(unittest.TestCase):
                 continue
             with open(os.path.join(commands_dir, name), "r", encoding="utf-8") as fh:
                 body = fh.read()
-            for skill in set(re.findall(r"apprentice:([A-Za-z0-9_-]+)", body)):
+            # "/apprentice:<verb>" names a command, not a skill
+            for skill in set(re.findall(r"(?<![/\w])apprentice:([A-Za-z0-9_-]+)", body)):
                 skill_md = os.path.join(REPO_ROOT, "skills", skill, "SKILL.md")
                 self.assertTrue(os.path.isfile(skill_md), "%s references missing skill %s" % (name, skill))
             if name == "suggest.md":
