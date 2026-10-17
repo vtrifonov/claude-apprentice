@@ -380,13 +380,22 @@ def _prune_markers(home_dir: str) -> None:
             continue
 
 
+def _housekeep(home_dir: str, label: str, step, *args) -> None:
+    # one failing step must not cost the session its link output or tone line
+    try:
+        step(*args)
+    except Exception as e:
+        config.log_error("session-start", "%s: %s: %s" % (label, type(e).__name__, e), home_dir)
+
+
 def handle_session_start(payload: dict, env: Mapping, home_dir: str, cfg: dict) -> Optional[str]:
-    config.ensure_dirs(home_dir)
-    _prune_events(home_dir, cfg["retention_months"])
-    _truncate_error_log(home_dir)
-    _prune_markers(home_dir)
+    _housekeep(home_dir, "ensure-dirs", config.ensure_dirs, home_dir)
+    _housekeep(home_dir, "prune-events", _prune_events, home_dir, cfg["retention_months"])
+    _housekeep(home_dir, "truncate-error-log", _truncate_error_log, home_dir)
+    _housekeep(home_dir, "prune-markers", _prune_markers, home_dir)
     plugin_root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-    _write_atomic(os.path.join(home_dir, "state", "plugin-root"), plugin_root.encode("utf-8"))
+    _housekeep(home_dir, "plugin-root", _write_atomic, os.path.join(home_dir, "state", "plugin-root"),
+               plugin_root.encode("utf-8"))
     cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) and payload.get("cwd") else os.getcwd()
     status, content = worktrees.ensure_link(cwd)
     group = config.group_of_profile(config.current_profile(env), cfg, config.read_group_labels(home_dir))
@@ -397,7 +406,8 @@ def handle_session_start(payload: dict, env: Mapping, home_dir: str, cfg: dict) 
             tone_path = candidate
     info = {"ts": config.utc_now_iso(), "cwd": cwd, "is_worktree": worktrees.is_worktree(cwd),
             "link": status, "group": group, "tone_line": tone_path is not None}
-    _write_atomic(os.path.join(home_dir, "state", "last-sessionstart.json"), json.dumps(info).encode("utf-8"))
+    _housekeep(home_dir, "last-sessionstart", _write_atomic, os.path.join(home_dir, "state", "last-sessionstart.json"),
+               json.dumps(info).encode("utf-8"))
     out = ""
     if status == "created" and content is not None:
         out += "Personal repo rules from CLAUDE.local.md (linked by apprentice):\n%s\n" % content

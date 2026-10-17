@@ -2,6 +2,7 @@ import json
 import os
 import stat
 import time
+from unittest import mock
 
 from apprentice import capture, config
 from tests.base import ApprenticeTestCase
@@ -101,6 +102,44 @@ class SessionStartTest(ApprenticeTestCase):
             info = json.load(fh)
         self.assertEqual(info["link"], "present")
         self.assertTrue(info["is_worktree"])
+
+    def errors(self):
+        try:
+            with open(self.p("hook-errors.log"), "r", encoding="utf-8") as fh:
+                return fh.read().splitlines()
+        except OSError:
+            return []
+
+    def test_plugin_root_blocked_still_prints_tone_line(self):
+        config.ensure_dirs(self.home)
+        os.makedirs(self.p("state", "plugin-root"))
+        self.write(self.p("state", "group-labels.json"), json.dumps({"default": "group-1"}))
+        tone = self.write(self.p("profile", "tone-group-1.md"), "tone\n")
+        out = self.start()
+        self.assertEqual(out, "apprentice tone file for this session (account group group-1): %s\n" % tone)
+        lines = self.errors()
+        self.assertEqual(len(lines), 1)
+        self.assertIn("session-start", lines[0])
+
+    def test_every_housekeeping_step_failing_keeps_link_and_tone(self):
+        tree = tree_fixture.build(self.fake_home)
+        self.write(os.path.join(tree["main"], _NAME), "# alice rules\n")
+        self.write(os.path.join(tree["main"], ".git", "info", "exclude"), _NAME + "\n")
+        config.ensure_dirs(self.home)
+        self.write(self.p("state", "group-labels.json"), json.dumps({"default": "group-1"}))
+        tone = self.write(self.p("profile", "tone-group-1.md"), "tone\n")
+        boom = OSError("disk full")
+        with mock.patch.object(capture.config, "ensure_dirs", side_effect=boom), \
+                mock.patch.object(capture, "_prune_events", side_effect=boom), \
+                mock.patch.object(capture, "_truncate_error_log", side_effect=boom), \
+                mock.patch.object(capture, "_prune_markers", side_effect=boom), \
+                mock.patch.object(capture, "_write_atomic", side_effect=boom):
+            out = self.start(cwd=tree["wt1"])
+        self.assertEqual(out, "Personal repo rules from CLAUDE.local.md (linked by apprentice):\n# alice rules\n\n"
+                         "apprentice tone file for this session (account group group-1): %s\n" % tone)
+        lines = self.errors()
+        self.assertEqual(len(lines), 6)
+        self.assertTrue(all("session-start" in line and "disk full" in line for line in lines))
 
     def test_explicit_group_slug(self):
         config.ensure_dirs(self.home)
