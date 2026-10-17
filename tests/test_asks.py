@@ -15,6 +15,11 @@ _PHRASINGS = [
     ("61% used; 2 working days left; 20%/day; pace=tight", 61.0, 20.0, 2.0, "tight"),
     ("Budget: 50% of the weekly limit used, 4 working days left, 12%/day available (pace=ample), "
      "resets 2030-01-07 04:00 +02:00", 50.0, 12.0, 4.0, "ample"),
+    ("weekly usage 70%, 2 working days left, 15%/day, pace=tight.", 70.0, 15.0, 2.0, "tight"),
+    ("weekly usage 70%, 2 working days left, 15%/day, pace=tight?", 70.0, 15.0, 2.0, "tight"),
+    ("weekly usage 70%, 2 working days left, 15%/day, pace=tight!", 70.0, 15.0, 2.0, "tight"),
+    ("weekly usage 70%, 2 working days left, 15%/day, pace=tight:", 70.0, 15.0, 2.0, "tight"),
+    ("weekly usage 70%, 2 working days left, 15%/day (pace=tight)", 70.0, 15.0, 2.0, "tight"),
 ]
 
 

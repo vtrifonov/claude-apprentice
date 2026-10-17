@@ -11,6 +11,7 @@ from apprentice.transcript import map_answer
 _RAW_CAP = 4000
 _NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
 _WORD_RE = re.compile(r"[a-z0-9]+")
+_KEYVAL_TRAILING = ".,;:?!)"
 
 
 def _blank(text: str, span: Tuple[int, int]) -> str:
@@ -35,7 +36,8 @@ def extract_numbers(text: str, tables: dict) -> Tuple[Dict[str, Union[float, str
         for found in list(regex.finditer(text)):
             if name == "KEYVAL":
                 key, raw = found.group(1).lower(), found.group(2)
-                if raw.startswith("<redacted"):
+                raw = raw.rstrip(_KEYVAL_TRAILING)
+                if not raw or raw.startswith("<redacted"):
                     text = _blank(text, found.span())
                     continue
                 value = _to_float(raw)  # type: Union[float, str, None]
