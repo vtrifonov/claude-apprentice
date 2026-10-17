@@ -49,16 +49,17 @@ def _read_tail(path: str, nbytes: int) -> bytes:
     return data
 
 
-def _anchor(text: Optional[str]) -> Optional[str]:
+def _anchor(text: Optional[str], cfg: Optional[dict] = None) -> Optional[str]:
     if not text:
         return None
-    clean = scrub(" ".join(text.split()))[0]
+    clean = scrub(" ".join(text.split()), cfg)[0]
     if not clean:
         return None
     return clean[-_ANCHOR_CHARS:]
 
 
-def tail_context(path: str, current_prompt: Optional[str] = None, nbytes: int = 65536) -> dict:
+def tail_context(path: str, current_prompt: Optional[str] = None, nbytes: int = 65536,
+                 cfg: Optional[dict] = None) -> dict:
     ctx = _empty_context()
     try:
         data = _read_tail(path, nbytes)
@@ -88,7 +89,7 @@ def tail_context(path: str, current_prompt: Optional[str] = None, nbytes: int = 
             text = message_text(obj)
             if text is None:
                 continue
-            ctx["prev_assistant"] = _anchor(text)
+            ctx["prev_assistant"] = _anchor(text, cfg)
             have_assistant = True
         elif kind == "user" and not have_user:
             text = message_text(obj)

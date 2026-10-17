@@ -272,7 +272,7 @@ def _handle_assistant(line: _Line, state: FileState) -> None:
             })
         del state.pending_asks[:-PENDING_CAP]
     text = message_text(line.obj)
-    anchor = _anchor(text)
+    anchor = _anchor(text, line.cfg)
     if anchor is not None:
         state.last_assistant = anchor
 

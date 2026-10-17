@@ -302,7 +302,7 @@ def handle_user_prompt(payload: dict, env: Mapping, home_dir: str, cfg: dict) ->
     prompt = payload.get("prompt")
     if not isinstance(prompt, str):
         prompt = ""
-    tail = transcript.tail_context(path or "", prompt)
+    tail = transcript.tail_context(path or "", prompt, cfg=cfg)
     entrypoint = resolve_entrypoint(payload, env, path, False) or tail["entrypoint"]
     capture, flags = should_capture(entrypoint, payload, cfg)
     if not capture:

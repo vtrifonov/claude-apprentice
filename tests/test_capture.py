@@ -241,6 +241,18 @@ class CaptureTest(ApprenticeTestCase):
         self.assertIs(rec["after_interrupt"], True)
         self.assertEqual(rec["prev_assistant"], "Starting the refactor.")
 
+    def test_prev_assistant_uses_user_scrub_config(self):
+        self.write(os.path.join(self.home, "config.json"), json.dumps({"extra_redact_patterns": [r"ZZ\d{4}"]}))
+        lines = [{"type": "assistant", "message": {"role": "assistant",
+                                                   "content": [{"type": "text", "text": "ticket ZZ1234 is done"}]}},
+                 {"type": "user", "message": {"role": "user", "content": "Please add a widget cache"}}]
+        path = self.write(os.path.join(self.fake_home, "t", "cfg.jsonl"),
+                          "".join(json.dumps(o) + "\n" for o in lines))
+        self.run_hook("user-prompt", self.payload("user_prompt", transcript_path=path))
+        (rec,) = self.records()
+        self.assertIsNotNone(rec["prev_assistant"])
+        self.assertNotIn("ZZ1234", rec["prev_assistant"])
+
     # entrypoints and capture gating
 
     def test_entrypoint_order_payload_env_tail(self):

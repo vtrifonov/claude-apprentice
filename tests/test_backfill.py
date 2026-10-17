@@ -274,6 +274,15 @@ class BackfillTest(ApprenticeTestCase):
         self.assertNotIn(secret, json.dumps(state.to_json()))
         self.assertNotIn(secret, events[0]["prev_assistant"])
 
+    def test_assistant_anchor_uses_user_scrub_config(self):
+        cfg = dict(self.cfg, extra_redact_patterns=[r"ZZ\d{4}"])
+        text = _line("assistant", [{"type": "text", "text": "ticket ZZ1234 is done"}], "2030-01-05T10:00:00Z")
+        text += _line("user", "Next step please", "2030-01-05T10:00:01Z")
+        events, state = self.run_file(self.tmp_transcript("anchor_cfg.jsonl", text), cfg=cfg)
+        self.assertIsNotNone(events[0]["prev_assistant"])
+        self.assertNotIn("ZZ1234", events[0]["prev_assistant"])
+        self.assertNotIn("ZZ1234", json.dumps(state.to_json()))
+
     def test_should_stop_checked_per_line(self):
         calls = []
 
