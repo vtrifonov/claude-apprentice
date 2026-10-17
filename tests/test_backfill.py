@@ -242,7 +242,7 @@ class BackfillTest(ApprenticeTestCase):
         gen = backfill.extract_file(_fixture("plain.jsonl"), state, self.cfg, None, None, {}, entrypoint="cli")
         next(gen)
         self.assertEqual(state.lines_done, 1)
-        self.assertEqual(state.last_user, "Please add a widget cache")
+        self.assertIs(state.last_user_interrupt, False)
         list(gen)
         self.assertEqual(state.lines_done, 3)
         self.assertEqual(state.last_assistant, "Added the cache.")
@@ -253,10 +253,48 @@ class BackfillTest(ApprenticeTestCase):
         state.lines_done = 3
         state.pending_asks = [{"tool_use_id": "tu9", "questions": [], "ts": "2030-01-05T10:00:00Z"}]
         state.last_assistant = "hi"
-        state.last_user = "there"
+        state.last_user_interrupt = True
         again = backfill.FileState.from_json(json.loads(json.dumps(state.to_json())))
         self.assertEqual(again.to_json(), state.to_json())
         self.assertEqual(backfill.FileState.from_json({}).to_json(), backfill.FileState().to_json())
+
+    def test_state_holds_no_user_text(self):
+        events = self.fixture_events("interrupt.jsonl")
+        self.assertTrue(events[1]["after_interrupt"])
+        state = backfill.FileState.from_json({"last_user": "[Request interrupted by user] secret words"})
+        self.assertIs(state.last_user_interrupt, False)
+        self.assertNotIn("last_user", state.to_json())
+        self.assertNotIn("secret words", json.dumps(state.to_json()))
+
+    def test_assistant_anchor_scrubbed_before_state(self):
+        secret = "AKIA" + "Q" * 16
+        text = _line("assistant", [{"type": "text", "text": "use key %s here" % secret}], "2030-01-05T10:00:00Z")
+        text += _line("user", "Next step please", "2030-01-05T10:00:01Z")
+        events, state = self.run_file(self.tmp_transcript("anchor.jsonl", text))
+        self.assertNotIn(secret, json.dumps(state.to_json()))
+        self.assertNotIn(secret, events[0]["prev_assistant"])
+
+    def test_should_stop_checked_per_line(self):
+        calls = []
+
+        def should_stop():
+            calls.append(1)
+            return len(calls) > 2
+
+        state = backfill.FileState()
+        events = list(backfill.extract_file(_fixture("plain.jsonl"), state, self.cfg, None, None, {},
+                                            entrypoint="cli", should_stop=should_stop))
+        lines = self.fixture_lines("plain.jsonl")
+        self.assertEqual([e["text"] for e in events], ["Please add a widget cache"])
+        self.assertEqual(state.lines_done, 2)
+        self.assertEqual(state.offset, len("".join(lines[:2]).encode("utf-8")))
+
+    def test_filter_outcomes_counted(self):
+        outcomes = {}
+        for name in ("plain.jsonl", "relay.jsonl", "compact.jsonl", "interrupt.jsonl"):
+            list(backfill.extract_file(_fixture(name), backfill.FileState(), self.cfg, None, None, {},
+                                       entrypoint="cli", outcomes=outcomes))
+        self.assertEqual(outcomes, {"prompt": 4, "drop": 1, "machine": 1, "interrupt": 1})
 
     def test_pending_asks_capped_at_twenty(self):
         uses = []
@@ -332,6 +370,30 @@ class BackfillTest(ApprenticeTestCase):
         text = filler + _line("user", "far", "2030-01-05T10:00:01Z", entrypoint="cli")
         path = self.tmp_transcript("far.jsonl", text)
         self.assertEqual(backfill.session_entrypoint_and_marker(path), (None, False))
+
+    def big_first_line(self, name, entrypoint_first=True):
+        body = backfill.PRECLASSIFY_MARKER + "\n" + ("pair: Alice asked about widgets. " * 2500)
+        obj = {"type": "user", "timestamp": "2030-01-05T10:00:00Z", "sessionId": "pc1", "cwd": _CWD}
+        if entrypoint_first:
+            obj["entrypoint"] = "sdk-cli"
+        obj["message"] = {"role": "user", "content": body}
+        if not entrypoint_first:
+            obj["entrypoint"] = "sdk-cli"
+        return self.tmp_transcript(name, json.dumps(obj) + "\n")
+
+    def test_large_first_user_line_keeps_entrypoint_and_marker(self):
+        path = self.big_first_line("big.jsonl")
+        self.assertGreater(os.path.getsize(path), 80 * 1024)
+        self.assertEqual(backfill.session_entrypoint_and_marker(path), ("sdk-cli", True))
+
+    def test_first_line_cut_at_cap_falls_back_to_raw_bytes(self):
+        saved = backfill._HEAD_CAP
+        backfill._HEAD_CAP = 70 * 1024
+        self.addCleanup(setattr, backfill, "_HEAD_CAP", saved)
+        path = self.big_first_line("cap.jsonl")
+        self.assertEqual(backfill.session_entrypoint_and_marker(path), ("sdk-cli", True))
+        late = self.big_first_line("cap_late.jsonl", entrypoint_first=False)
+        self.assertEqual(backfill.session_entrypoint_and_marker(late), (None, True))
 
     def test_entrypoint_missing_file(self):
         missing = os.path.join(self.fake_home, "nope.jsonl")

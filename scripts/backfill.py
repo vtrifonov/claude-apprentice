@@ -53,7 +53,21 @@ class _Log(object):
             self.fh.close()
 
 
+def _join_project(argv) -> list:
+    """`--project <slug>` -> `--project=<slug>`: real slugs start with "-", which argparse reads as an option."""
+    out = []
+    args = iter(argv)
+    for arg in args:
+        if arg == "--project":
+            value = next(args, None)
+            out.append(arg if value is None else "--project=" + value)
+        else:
+            out.append(arg)
+    return out
+
+
 def main(argv) -> int:
+    argv = _join_project(argv)
     for arg in argv:
         if arg.split("=", 1)[0] in _REMOVED_FLAGS:
             sys.stderr.write("backfill.py: %s\n" % _REMOVED_MESSAGE)

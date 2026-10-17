@@ -1,10 +1,12 @@
 import argparse
 import contextlib
+import fcntl
 import io
 import json
 import os
 import signal
 import subprocess
+import threading
 import time
 
 from apprentice import backfill, config, events
@@ -16,6 +18,7 @@ _SCRIPT = os.path.join(REPO_ROOT, "scripts", "backfill.py")
 _CWD = "/home/alice/code/acme/widgets"
 _SLUG = "-home-alice-code-acme-widgets"
 _NOTICE = "backfill already running (pid "
+_SIGINT_FILES = 200  # x 400 lines: a full run takes about 9 s, well over 2 s
 
 
 def _fixture(name):
@@ -182,20 +185,67 @@ class BackfillRunTest(ApprenticeTestCase):
         self.assertEqual(len(set(keys)), 3)
 
     def test_cursor_flush_on_sigint(self):
-        self.gen_set(200, 400)
+        self.gen_set(_SIGINT_FILES, 400)
         proc = self.popen()
         self.wait_for_pid(proc)
         time.sleep(0.3)
-        try:
-            proc.send_signal(signal.SIGINT)
-        except ProcessLookupError:
-            pass
+        self.assertIsNone(proc.poll(), "the run finished before the signal")
+        proc.send_signal(signal.SIGINT)
         proc.wait(timeout=30)
         self.assertEqual(proc.returncode, 0, proc.stderr.read())
+        self.assertIn(b"backfill interrupted", proc.stdout.read())
         with open(os.path.join(self.home, "state", "backfill-cursor.json"), "r", encoding="utf-8") as fh:
             data = json.load(fh)
         self.assertIsInstance(data["files"], dict)
         self.assertGreater(len(data["files"]), 0)
+        self.assertLess(len(data["files"]), _SIGINT_FILES)
+
+    def test_interrupt_mid_file_resumes_mid_file(self):
+        lines = [_line("user", "First request here", "2030-01-05T10:00:00Z"),
+                 _line("assistant", [{"type": "text", "text": "ok"}], "2030-01-05T10:00:01Z"),
+                 _line("user", "Second request here", "2030-01-05T10:00:02Z"),
+                 _line("user", "Third request here", "2030-01-05T10:00:03Z")]
+        path = self.place("mid.jsonl", text="".join(lines))
+        real = backfill._handle_assistant
+
+        def interrupting(line, state):
+            real(line, state)
+            os.kill(os.getpid(), signal.SIGINT)
+
+        backfill._handle_assistant = interrupting
+        self.addCleanup(setattr, backfill, "_handle_assistant", real)
+        first = self.run_backfill()
+        backfill._handle_assistant = real
+        self.assertTrue(first["interrupted"])
+        self.assertEqual([e["text"] for e in self.stored()], ["First request here"])
+        entry = self.cursor_entry(path)
+        self.assertEqual(entry["offset"], len("".join(lines[:2]).encode("utf-8")))
+        self.assertLess(entry["size"], os.path.getsize(path))
+        second = self.run_backfill()
+        self.assertEqual(second["dropped"]["prompt_key"], 0)
+        self.assertEqual([e["text"] for e in self.stored()],
+                         ["First request here", "Second request here", "Third request here"])
+
+    def test_cursor_file_holds_no_user_text(self):
+        secret = "AKIA" + "Q" * 16
+        password = "hunter" + "2secretvalue"
+        last = "my key is %s and password %s please" % (secret, password)
+        self.place("secret.jsonl", text=_line("user", last, "2030-01-05T10:00:00Z"))
+        self.run_backfill()
+        blob = _read(os.path.join(self.home, "state", "backfill-cursor.json"))
+        self.assertNotIn(secret, blob)
+        self.assertNotIn(password, blob)
+        for i in range(len(last) - 19):
+            self.assertNotIn(last[i:i + 20], blob)
+
+    def test_legacy_last_user_dropped_on_load(self):
+        config.ensure_dirs(self.home)
+        cursor_file = os.path.join(self.home, "state", "backfill-cursor.json")
+        legacy = {"size": 1, "mtime": 1.0, "offset": 1, "lines_done": 1,
+                  "state": {"offset": 1, "last_user": "legacy secret words"}}
+        self.write(cursor_file, json.dumps({"v": 1, "files": {"/f/a.jsonl": legacy}}))
+        backfill.Cursor.load(self.home).save()
+        self.assertNotIn("legacy secret words", _read(cursor_file))
 
     def test_cursor_maybe_save_every_50_files_and_5s(self):
         now = [1000.0]
@@ -238,6 +288,18 @@ class BackfillRunTest(ApprenticeTestCase):
         notice = [out for code, out in outs if code == 1][0]
         self.assertIn(_NOTICE, notice)
         self.assertEqual(sum(_NOTICE in out for _, out in outs), 1)
+
+    def test_lock_retries_a_brief_holder(self):
+        config.ensure_dirs(self.home)
+        holder = os.open(os.path.join(self.home, "state", "backfill.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, holder)
+        fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        timer = threading.Timer(0.03, fcntl.flock, (holder, fcntl.LOCK_UN))
+        timer.start()
+        self.addCleanup(timer.join)
+        fd, held_by = backfill._acquire_lock(self.home)
+        self.assertGreaterEqual(fd, 0, held_by)
+        os.close(fd)
 
     def test_lock_released_after_holder_killed(self):
         self.gen_set(200, 400)
@@ -299,6 +361,16 @@ class BackfillRunTest(ApprenticeTestCase):
         self.assertEqual(prompts["sess-fork-b"]["duplicate_of"], prompts["sess-fork-a"]["id"])
         self.assertEqual(summary["duplicates"], 1)
 
+    def test_duplicate_of_never_points_at_later_prompt(self):
+        self.place("s3.jsonl", text=_line("user", "run the full test suite now", "2030-01-05T11:00:30Z",
+                                          session="s3"), mtime=1000)
+        self.place("s2.jsonl", text=_line("user", "run the full test suite now", "2030-01-05T11:00:00Z",
+                                          session="s2"), mtime=2000)
+        self.run_backfill()
+        prompts = {e["session_id"]: e for e in self.stored() if e["kind"] == "prompt"}
+        self.assertIsNone(prompts["s2"]["duplicate_of"])
+        self.assertIsNone(prompts["s3"]["duplicate_of"])
+
     def test_retention_cutoff_skips_old_lines(self):
         self.write(os.path.join(self.home, "config.json"), json.dumps({"retention_months": 2}))
         recent = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 3600))
@@ -320,8 +392,19 @@ class BackfillRunTest(ApprenticeTestCase):
         self.assertTrue(any("files scanned" in line for line in self.lines))
         self.assertEqual(self.run_backfill()["events_written"], 2)
 
-    def test_summary_line_fields(self):
+    def test_dry_run_counts_by_outcome_and_project(self):
         self.place("plain.jsonl")
+        self.place("relay.jsonl", slug="-home-alice-other")
+        self.place("compact.jsonl", slug="-home-alice-other")
+        self.run_backfill(dry_run=True)
+        self.assertIn("dry run by filter outcome: drop 1, machine 1, prompt 2", self.lines)
+        self.assertIn("dry run by project: -home-alice-code-acme-widgets 2, -home-alice-other 1", self.lines)
+        self.assertTrue(self.lines[-1].startswith("backfill done"))
+        self.run_backfill()
+        self.assertFalse(any(line.startswith("dry run by") for line in self.lines[3:]))
+
+    def test_summary_line_fields(self):
+        plain = self.place("plain.jsonl")
         self.place(os.path.join("s", "subagents", "a.jsonl"), source="plain.jsonl")
         self.place("s.jsonl", slug="x-claude-mem-observer", source="plain.jsonl")
         self.place("entry_sdk_cli.jsonl")
@@ -329,7 +412,8 @@ class BackfillRunTest(ApprenticeTestCase):
         summary = self.run_backfill()
         line = self.lines[-1]
         for field in ("files scanned 1", "skipped (subagents 1, observer 1, entrypoint 1, marker 1",
-                      "events by kind", "prompt 2", "dropped by rule", "duplicates 0", "elapsed"):
+                      "events by kind", "prompt 2", "dropped by rule", "duplicates 0",
+                      "bytes read %d, elapsed" % os.path.getsize(plain)):
             self.assertIn(field, line)
         self.assertIn(line, self.stdout)
         self.assertEqual(summary["files_scanned"], 1)
@@ -353,10 +437,15 @@ class BackfillRunTest(ApprenticeTestCase):
     def test_command_file(self):
         body = _read(os.path.join(REPO_ROOT, "commands", "backfill.md"))
         self.assertTrue(body.startswith("---\ndescription: Backfill apprentice events from past transcripts\n"))
-        self.assertIn("argument-hint: [--since YYYY-MM] [--project <slug>] [--dry-run]\n", body)
+        self.assertIn("argument-hint: [--since YYYY-MM] [--project=<slug>] [--dry-run]\n", body)
         self.assertIn("allowed-tools: Bash(nohup *), Bash(${APPRENTICE_PYTHON:-/usr/bin/python3} *)\n", body)
-        self.assertIn('nohup "${APPRENTICE_PYTHON:-/usr/bin/python3}" -I -S "<root>/scripts/backfill.py" $ARGUMENTS'
-                      ' > "${APPRENTICE_HOME:-$HOME/.claude/apprentice}/state/backfill.log" 2>&1 &', body)
+        launch = ('nohup "${APPRENTICE_PYTHON:-/usr/bin/python3}" -I -S "<root>/scripts/backfill.py" $ARGUMENTS'
+                  ' > "${APPRENTICE_HOME:-$HOME/.claude/apprentice}/state/backfill.log" 2>&1 &')
+        preflight = '"${APPRENTICE_PYTHON:-/usr/bin/python3}" -I -S "<root>/scripts/backfill.py" --help > /dev/null'
+        self.assertIn(launch, body)
+        self.assertIn(preflight, body)
+        self.assertLess(body.index(preflight), body.index(launch))
+        self.assertLess(body.index("xcrun"), body.index(launch))
         for needle in ("${CLAUDE_PLUGIN_ROOT}", "state/plugin-root", "/apprentice:status", "126", "127", "xcrun",
                        "xcode-select --install", "APPRENTICE_PYTHON"):
             self.assertIn(needle, body)
@@ -370,6 +459,16 @@ class BackfillRunTest(ApprenticeTestCase):
         self.assertIn(b"files scanned 1", result.stdout)
         self.assertIn("files scanned 1", _read(log))
         self.assertEqual(len(self.stored()), 2)
+
+    def test_project_space_form_with_dash_slug(self):
+        self.place("plain.jsonl")
+        self.place("image.jsonl", slug="-home-alice-other")
+        log = os.path.join(self.fake_home, "bf.log")
+        result = subprocess.run(["/usr/bin/python3", "-I", "-S", _SCRIPT, "--project", _SLUG, "--log", log],
+                                env=dict(os.environ), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(b"files scanned 1", result.stdout)
+        self.assertEqual([e["text"] for e in self.stored()], ["Please add a widget cache", "Now add tests for it"])
 
     def test_stdout_redirected_to_log_writes_summary_once(self):
         self.place("plain.jsonl")

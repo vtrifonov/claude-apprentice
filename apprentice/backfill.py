@@ -6,6 +6,7 @@ import datetime
 import fcntl
 import json
 import os
+import re
 import signal
 import time
 from typing import Callable, Dict, Iterator, List, Optional, Set, Tuple
@@ -26,21 +27,28 @@ LOCK_FILE = "backfill.lock"
 PENDING_CAP = 20
 PRECLASSIFY_MARKER = "[apprentice-preclassify v1]"
 _HEAD_BYTES = 64 * 1024
-_USER_KEEP = 100
+_HEAD_CAP = 8 * 1024 * 1024  # LineStream's line cap
+_ENTRYPOINT_RE = re.compile(rb'"entrypoint"\s*:\s*"([^"]+)"')
+_USER_RE = re.compile(rb'"type"\s*:\s*"user"')
+_MARKER_RE = re.compile(rb'"(?:content|text)"\s*:\s*"' + re.escape(PRECLASSIFY_MARKER.encode("ascii")))
+LOCK_TRIES = 5
+LOCK_RETRY_SECONDS = 0.02
 _INTERRUPT_PREFIX = "[Request interrupted by user"
 _REJECT_PREFIXES = ("The user doesn't want to proceed", "The user wants to clarify these questions")
 _ASK_TOOL = "AskUserQuestion"
 
 
 class FileState(object):
+    """Extractor state between runs. It never holds user text: the cursor file is not scrubbed."""
+
     def __init__(self, offset: int = 0, lines_done: int = 0, pending_asks: Optional[List[dict]] = None,
-                 last_assistant: Optional[str] = None, last_user: Optional[str] = None,
+                 last_assistant: Optional[str] = None, last_user_interrupt: bool = False,
                  last_user_rejected: bool = False):
         self.offset = offset
         self.lines_done = lines_done
         self.pending_asks = pending_asks if pending_asks is not None else []  # type: List[dict]
         self.last_assistant = last_assistant
-        self.last_user = last_user
+        self.last_user_interrupt = last_user_interrupt
         self.last_user_rejected = last_user_rejected
 
     def to_json(self) -> dict:
@@ -49,53 +57,73 @@ class FileState(object):
             "lines_done": self.lines_done,
             "pending_asks": list(self.pending_asks),
             "last_assistant": self.last_assistant,
-            "last_user": self.last_user,
+            "last_user_interrupt": self.last_user_interrupt,
             "last_user_rejected": self.last_user_rejected,
         }
 
     @classmethod
     def from_json(cls, data: dict) -> "FileState":
+        # a legacy "last_user" string is ignored
         pending = data.get("pending_asks")
         return cls(
             offset=int(data.get("offset") or 0),
             lines_done=int(data.get("lines_done") or 0),
             pending_asks=[p for p in pending if isinstance(p, dict)] if isinstance(pending, list) else [],
             last_assistant=data.get("last_assistant"),
-            last_user=data.get("last_user"),
+            last_user_interrupt=bool(data.get("last_user_interrupt")),
             last_user_rejected=bool(data.get("last_user_rejected")),
         )
 
 
-def _head_lines(path: str) -> List[dict]:
+def _read_head(path: str) -> Tuple[List[dict], bytes]:
+    """Parsed lines from the first 64 KB and on until the first user line is complete, capped at
+    _HEAD_CAP; plus the raw prefix of a line still cut at the cap (else b"")."""
+    out = []  # type: List[dict]
     try:
         with open(path, "rb") as fh:
-            data = fh.read(_HEAD_BYTES + 1)
+            read = 0
+            seen_user = False
+            while read < _HEAD_BYTES or not seen_user:
+                raw = fh.readline(_HEAD_CAP + 1 - read)
+                if not raw:
+                    break
+                read += len(raw)
+                if read > _HEAD_CAP:
+                    return out, raw
+                try:
+                    obj = json.loads(raw.decode("utf-8", errors="replace"))
+                except ValueError:
+                    continue
+                if isinstance(obj, dict):
+                    out.append(obj)
+                    seen_user = seen_user or obj.get("type") == "user"
     except OSError:
-        return []
-    pieces = data.split(b"\n")
-    if len(data) > _HEAD_BYTES:
-        pieces = pieces[:-1]  # the last piece is cut mid-line
-    out = []
-    for raw in pieces:
-        try:
-            obj = json.loads(raw.decode("utf-8", errors="replace"))
-        except ValueError:
-            continue
-        if isinstance(obj, dict):
-            out.append(obj)
-    return out
+        pass
+    return out, b""
+
+
+def _head_lines(path: str) -> List[dict]:
+    return _read_head(path)[0]
 
 
 def session_entrypoint_and_marker(path: str) -> Tuple[Optional[str], bool]:
     entrypoint = None
     marker = False
     seen_user = False
-    for obj in _head_lines(path):
+    objs, cut = _read_head(path)
+    for obj in objs:
         if entrypoint is None and isinstance(obj.get("entrypoint"), str) and obj["entrypoint"]:
             entrypoint = obj["entrypoint"]
         if not seen_user and obj.get("type") == "user":
             seen_user = True
             marker = (message_text(obj) or "").startswith(PRECLASSIFY_MARKER)
+    if cut:
+        # a line too long to parse: read the fields from its raw prefix
+        match = _ENTRYPOINT_RE.search(cut)
+        if entrypoint is None and match:
+            entrypoint = match.group(1).decode("utf-8", "replace")
+        if not seen_user and _USER_RE.search(cut):
+            marker = _MARKER_RE.search(cut) is not None
     return entrypoint, marker
 
 
@@ -193,10 +221,13 @@ def _ask_event(line: _Line, pending: dict, answers: Optional[Dict[str, str]], re
     return record
 
 
-def _prompt_event(line: _Line, text: str, state: FileState, was_rejected: bool) -> Optional[dict]:
+def _prompt_event(line: _Line, text: str, state: FileState, was_rejected: bool,
+                  outcomes: Optional[Dict[str, int]]) -> Optional[dict]:
     if text.startswith(_INTERRUPT_PREFIX):
+        _count(outcomes, "interrupt")
         return None
     result = filters.classify(text)
+    _count(outcomes, result["outcome"])
     if result["outcome"] == "drop":
         return None
     if result["outcome"] == "machine":
@@ -213,7 +244,7 @@ def _prompt_event(line: _Line, text: str, state: FileState, was_rejected: bool) 
         "tags": result["tags"],
         "register": result["register"],
         "strong_marker": result["strong_marker"],
-        "after_interrupt": (state.last_user or "").startswith(_INTERRUPT_PREFIX),
+        "after_interrupt": state.last_user_interrupt,
         "after_rejected_ask": was_rejected,
         "prev_assistant": state.last_assistant,
         "duplicate_of": None,
@@ -252,7 +283,12 @@ def _answers_for(block: dict, tool_use_result) -> Optional[Dict[str, str]]:
     return parse_ask_answer(block.get("content"))
 
 
-def _handle_user(line: _Line, state: FileState) -> List[dict]:
+def _count(counts: Optional[Dict[str, int]], key: str) -> None:
+    if counts is not None:
+        counts[key] = counts.get(key, 0) + 1
+
+
+def _handle_user(line: _Line, state: FileState, outcomes: Optional[Dict[str, int]] = None) -> List[dict]:
     out = []  # type: List[dict]
     message = line.obj.get("message")
     content = message.get("content") if isinstance(message, dict) else None
@@ -274,20 +310,26 @@ def _handle_user(line: _Line, state: FileState) -> List[dict]:
     text = message_text(line.obj)
     if text is not None:
         if line.emit:
-            record = _prompt_event(line, text, state, was_rejected)
+            record = _prompt_event(line, text, state, was_rejected, outcomes)
             if record is not None:
                 out.append(record)
-        state.last_user = text[:_USER_KEEP]
+        state.last_user_interrupt = text.startswith(_INTERRUPT_PREFIX)
     state.last_user_rejected = rejected_here
     return out
 
 
 def extract_file(path: str, state: FileState, cfg: dict, cutoff_ts: Optional[str], since_ts: Optional[str],
-                 repo_cache: dict, entrypoint: Optional[str] = None) -> Iterator[dict]:
+                 repo_cache: dict, entrypoint: Optional[str] = None,
+                 should_stop: Optional[Callable[[], bool]] = None,
+                 outcomes: Optional[Dict[str, int]] = None) -> Iterator[dict]:
+    """Yields the file's events. When should_stop turns true it returns at a line boundary, leaving
+    state.offset after the last line done, so a later run resumes there."""
     floors = [e for e in (config.ts_epoch(cutoff_ts), config.ts_epoch(since_ts)) if e is not None]
     floor = max(floors) if floors else None
     stream = LineStream(path, state.offset)
     for pos, raw in stream:
+        if should_stop is not None and should_stop():
+            return
         state.offset = pos
         state.lines_done += 1
         try:
@@ -305,7 +347,7 @@ def extract_file(path: str, state: FileState, cfg: dict, cutoff_ts: Optional[str
             continue
         if kind != "user":
             continue
-        for record in _handle_user(line, state):
+        for record in _handle_user(line, state, outcomes):
             yield record
     state.offset = stream.offset
 
@@ -417,6 +459,9 @@ class Cursor(object):
                 files = {k: v for k, v in data["files"].items() if isinstance(v, dict)}
         except (OSError, ValueError):
             pass
+        for entry in files.values():
+            if isinstance(entry.get("state"), dict):
+                entry["state"].pop("last_user", None)  # legacy raw prompt text
         return cls(path, files)
 
     def get(self, path: str) -> Optional[dict]:
@@ -566,7 +611,8 @@ class DedupIndex(object):
             # a cut text is a lossy view, so only the raw full-text hash can confirm the match
             if (cut or other_cut) and other_sha1 != event.get("sha1"):
                 continue
-            if abs(epoch - other_epoch) <= DUPLICATE_WINDOW:
+            # only an earlier prompt: a later twin seen first stays unmarked, as in live capture
+            if other_epoch <= epoch and epoch - other_epoch <= DUPLICATE_WINDOW:
                 return other_id
         return None
 
@@ -582,9 +628,15 @@ def _retention_cutoff(months: int) -> Optional[str]:
 def _acquire_lock(home_dir: str) -> Tuple[int, str]:
     """(fd, "") with the kernel lock held, or (-1, holder pid text) when another run holds it."""
     fd = os.open(os.path.join(home_dir, "state", LOCK_FILE), os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+    # retry briefly: status probes the lock by taking it for a moment
+    for attempt in range(LOCK_TRIES):
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if attempt + 1 < LOCK_TRIES:
+                time.sleep(LOCK_RETRY_SECONDS)
+    else:
         try:
             holder = os.read(fd, 32).decode("ascii", "replace").strip()
         finally:
@@ -653,6 +705,8 @@ def _run_locked(args, env, log: Callable[[str], None], home_dir: str, started: f
     index = DedupIndex.load(home_dir, _file_months(paths))
     repo_cache = {}  # type: dict
     by_kind = {}  # type: Dict[str, int]
+    by_project = {}  # type: Dict[str, int]
+    outcomes = {}  # type: Dict[str, int]
     written = duplicates = bytes_read = scanned = unchanged = errors = 0
     interrupted = False
     for path in paths:
@@ -667,8 +721,10 @@ def _run_locked(args, env, log: Callable[[str], None], home_dir: str, started: f
                 unchanged += 1
             else:
                 start = state.offset
+                slug = os.path.basename(os.path.dirname(path))
                 for event in extract_file(path, state, cfg, cutoff_ts, since_ts, repo_cache,
-                                          entrypoint=stats["entrypoints"].get(path)):
+                                          entrypoint=stats["entrypoints"].get(path), should_stop=lambda: bool(stop),
+                                          outcomes=outcomes):
                     if index.accept(event):
                         if event["kind"] == "prompt":
                             event["duplicate_of"] = index.duplicate_of(event)
@@ -677,13 +733,13 @@ def _run_locked(args, env, log: Callable[[str], None], home_dir: str, started: f
                             events.append_event(home_dir, event)
                             written += 1
                         by_kind[event["kind"]] = by_kind.get(event["kind"], 0) + 1
-                    if stop:
-                        break
-                if stop:
-                    # the file's progress is not recorded; the next run redoes it and dedup drops what was written
+                        by_project[slug] = by_project.get(slug, 0) + 1
+                bytes_read += state.offset - start
+                if stop and state.offset < st.st_size:
+                    # stopped mid-file: a stored size below the real one makes the next run resume at the offset
+                    cursor.set(path, state.offset, st.st_mtime, state)
                     interrupted = True
                     break
-                bytes_read += state.offset - start
                 cursor.set(path, st.st_size, st.st_mtime, state)
         except OSError:
             errors += 1
@@ -698,14 +754,20 @@ def _run_locked(args, env, log: Callable[[str], None], home_dir: str, started: f
     elapsed = time.monotonic() - started
     skipped = {k: stats["skipped_" + k] for k in ("subagents", "observer", "entrypoint", "marker", "since")}
     line = ("backfill %s: files scanned %d, skipped (subagents %d, observer %d, entrypoint %d, marker %d, since %d), "
-            "unchanged %d, errors %d, events by kind (%s), dropped by rule (%s), duplicates %d, elapsed %.1fs%s"
+            "unchanged %d, errors %d, events by kind (%s), dropped by rule (%s), duplicates %d, bytes read %d, "
+            "elapsed %.1fs%s"
             % ("interrupted" if interrupted else "done", scanned, skipped["subagents"], skipped["observer"],
                skipped["entrypoint"], skipped["marker"], skipped["since"], unchanged, errors, _pairs(by_kind),
-               _pairs(index.dropped), duplicates, elapsed, " (dry run, nothing written)" if dry else ""))
-    log(line)
-    if not getattr(log, "to_stdout", False):
-        print(line, flush=True)
+               _pairs(index.dropped), duplicates, bytes_read, elapsed, " (dry run, nothing written)" if dry else ""))
+    # the summary stays the last line: status reads it from the log tail
+    lines = ["dry run by filter outcome: %s" % _pairs(outcomes),
+             "dry run by project: %s" % _pairs(by_project)] if dry else []
+    for text in lines + [line]:
+        log(text)
+        if not getattr(log, "to_stdout", False):
+            print(text, flush=True)
     return {"exit": 0, "files_scanned": scanned, "files_total": len(paths), "skipped": skipped,
-            "unchanged": unchanged, "errors": errors, "events_by_kind": by_kind, "events_written": written,
+            "unchanged": unchanged, "errors": errors, "events_by_kind": by_kind, "events_by_project": by_project,
+            "filter_outcomes": outcomes, "events_written": written,
             "dropped": dict(index.dropped), "duplicates": duplicates, "bytes_read": bytes_read,
             "elapsed": elapsed, "interrupted": interrupted, "dry_run": dry, "line": line}
