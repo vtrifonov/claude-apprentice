@@ -30,16 +30,27 @@ def payload_bytes(name, transcript, **overrides):
     return json.dumps(data).encode("utf-8")
 
 
-def run_hook(event, stdin, env_extra, root=None, home=None, fake_home=None):
+def baseline_command(event):
+    """Return the hooks.json command for `event` with the script swapped for `-c pass`: same shell,
+    interpreter and flags, no apprentice code."""
+    command = hook_command(event)
+    script = '"${CLAUDE_PLUGIN_ROOT}/hooks/capture.py" %s' % event
+    if script not in command:
+        raise ValueError("hook command for %s does not run %s" % (event, script))
+    return command.replace(script, "-c pass")
+
+
+def run_hook(event, stdin, env_extra, root=None, home=None, fake_home=None, command=None):
     """Run the hooks.json command for `event` through sh; return (code, stdout, stderr).
 
-    root defaults to the repo, home and fake_home to the current APPRENTICE_HOME and HOME.
+    root defaults to the repo, home and fake_home to the current APPRENTICE_HOME and HOME;
+    command overrides the hooks.json command string.
     """
     env = {"PATH": "/usr/bin:/bin"}
     env["CLAUDE_PLUGIN_ROOT"] = root or REPO_ROOT
     env["APPRENTICE_HOME"] = home if home is not None else os.environ["APPRENTICE_HOME"]
     env["HOME"] = fake_home if fake_home is not None else os.environ["HOME"]
     env.update(env_extra)
-    result = subprocess.run(["sh", "-c", hook_command(event)], input=stdin, env=env,
+    result = subprocess.run(["sh", "-c", command or hook_command(event)], input=stdin, env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return result.returncode, result.stdout, result.stderr
