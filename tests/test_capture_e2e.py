@@ -41,7 +41,7 @@ class CaptureEndToEndTest(ApprenticeTestCase):
         self.run_silent("post-tool", payload_bytes("post_tool_dict", _PLAIN, tool_use_id="tu1"))
         (rec,) = self.records()
         self.assertEqual(rec["kind"], "ask")
-        self.assertEqual(rec["questions"][0]["answer"]["labels"], ["Quick"])
+        self.assertEqual(rec["questions"][0]["answer"]["labels"], ["Quick (Recommended)"])
 
     def test_user_prompt_writes_prompt(self):
         self.run_silent("user-prompt", payload_bytes("user_prompt", _PLAIN))

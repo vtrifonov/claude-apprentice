@@ -80,7 +80,7 @@ An AskUserQuestion call and its answer.
 
 | Field | Type | Nullable | Source | Notes |
 |---|---|---|---|---|
-| `labels` | list of string | no | both | Picked option labels. |
+| `labels` | list of string | no | both | Picked option labels, exactly as `options[].label` stores them, including "(Recommended)". Matching the answer to an option is case-insensitive and whitespace-collapsed and ignores "(Recommended)". |
 | `free_text` | string | yes | both | Text typed under "Other". |
 | `is_other` | bool | no | both | The answer used "Other". |
 | `followed_recommended` | bool | yes | both | True when a recommended option exists and every chosen label is recommended; false when a recommended option exists and was not chosen; null when the question had no recommended option or the answer is free text only. |

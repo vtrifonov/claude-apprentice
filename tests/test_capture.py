@@ -123,7 +123,8 @@ class CaptureTest(ApprenticeTestCase):
             self.assertEqual(rec["cwd"], "/home/alice/code/acme/widgets")
             self.assertEqual(rec["ticket"], "XX-123")
             self.assertEqual(rec["entrypoint"], "cli")
-            self.assertEqual(rec["questions"][0]["answer"]["labels"], ["Quick"])
+            self.assertEqual(rec["questions"][0]["answer"]["labels"], ["Quick (Recommended)"])
+            self.assertEqual(rec["questions"][0]["answer"]["labels"][0], rec["questions"][0]["options"][0]["label"])
             self.assertNotIn("partial", rec)
 
     def test_post_tool_leaves_marker_of_later_picker(self):

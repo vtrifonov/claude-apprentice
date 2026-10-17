@@ -239,17 +239,18 @@ _QUESTION = {
 
 
 class MapAnswerTest(unittest.TestCase):
-    def test_map_answer_label_case_ws_recommended_stripped(self):
+    def test_map_answer_label_case_ws_recommended_ignored_raw_label_kept(self):
         for answer in ("Quick (Recommended)", "quick", "  QUICK   ", "Quick"):
             res = transcript.map_answer(answer, _QUESTION)
-            self.assertEqual(res["labels"], ["Quick"], answer)
+            self.assertEqual(res["labels"], ["Quick (Recommended)"], answer)
+            self.assertEqual(res["labels"][0], _QUESTION["options"][0]["label"], answer)
             self.assertIsNone(res["free_text"], answer)
             self.assertFalse(res["is_other"], answer)
 
     def test_map_multi_select_split_only_when_all_match(self):
         question = dict(_QUESTION, multiSelect=True)
         res = transcript.map_answer("Quick, Full", question)
-        self.assertEqual(res["labels"], ["Quick", "Full"])
+        self.assertEqual(res["labels"], ["Quick (Recommended)", "Full"])
         self.assertFalse(res["is_other"])
         res = transcript.map_answer("Quick, something else", question)
         self.assertEqual(res["labels"], [])
@@ -319,7 +320,7 @@ class FixtureShapeTest(unittest.TestCase):
         result = [o for o in objs if "toolUseResult" in o][0]
         answers = transcript.parse_ask_answer(result["toolUseResult"])
         res = transcript.map_answer(answers[question["question"]], question)
-        self.assertEqual(res["labels"], ["Quick"])
+        self.assertEqual(res["labels"], ["Quick (Recommended)"])
         self.assertIs(res["followed_recommended"], True)
         block_text = transcript.message_text(result)
         self.assertIsNone(block_text)

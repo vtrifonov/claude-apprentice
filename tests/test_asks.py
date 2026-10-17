@@ -132,7 +132,7 @@ class AsksTest(ApprenticeTestCase):
         self.assertTrue(partial)
         self.assertIs(built[0]["options"][0]["recommended"], True)
         self.assertIs(built[0]["options"][1]["recommended"], False)
-        self.assertEqual(built[0]["answer"]["labels"], ["A"])
+        self.assertEqual(built[0]["answer"]["labels"], ["A (Recommended)"])
         self.assertEqual(built[1]["options"], [])
         self.assertIsNone(built[1]["answer"])
         done, partial2 = asks.build_questions(questions[:1], {"Pick   one?": "B"}, _cfg())

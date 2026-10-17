@@ -173,8 +173,9 @@ def map_answer(answer: Optional[str], question: dict) -> Optional[dict]:
     by_norm = {}
     recommended = set()
     for opt in options:
+        # match on the normalized form, but store the label exactly as options[].label has it
         key = _norm(opt["label"])
-        by_norm[key] = " ".join(_RECOMMENDED_RE.sub("", opt["label"]).split())
+        by_norm[key] = opt["label"]
         if _RECOMMENDED_RE.search(opt["label"]):
             recommended.add(key)
     keys: List[str] = []
