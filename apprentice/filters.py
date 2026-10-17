@@ -104,12 +104,13 @@ def classify(text: str) -> Dict:
     command = text.split()[0]
     if _COMMAND_RE.match(command):
         return _result("machine", text, None, command=command)
-    if _IMAGE_ONLY_RE.match(text):
+    stripped = text.lstrip()
+    if _IMAGE_ONLY_RE.match(stripped):
         return _result("prompt", text, None, tags=["image_only"], image_only=True)
     pasted = len(text) > LONG_TEXT or _paste_lines(text) >= _PASTE_LINES
-    if not pasted and _ACK_RE.match(text):
+    if not pasted and _ACK_RE.match(stripped):
         return _result("prompt", text, text[:TEXT_CAP], register="ack")
-    tags = _tags(text[:80].lower())
+    tags = _tags(stripped[:80].lower())
     if pasted:
         tags = sorted(tags + ["pasted"])
     return _result(

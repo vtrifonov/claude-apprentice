@@ -86,6 +86,17 @@ class FiltersTest(ApprenticeTestCase):
         self.assertEqual(filters.classify("Yes.")["register"], "ack")
         self.assertNotEqual(filters.classify("ok but why")["register"], "ack")
 
+    def test_leading_whitespace_ignored_for_head_ack_image(self):
+        result = filters.classify("  but why did you do that")
+        self.assertIn("correction", result["tags"])
+        self.assertEqual(result["text"], "  but why did you do that")
+        self.assertEqual(result["len"], 25)
+        result = filters.classify(" ok")
+        self.assertEqual(result["register"], "ack")
+        self.assertEqual(result["text"], " ok")
+        self.assertEqual(result["sha1"], hashlib.sha1(b" ok").hexdigest())
+        self.assertTrue(filters.classify("  [Image #2]")["image_only"])
+
     def test_rule7_empty_drop(self):
         self.assertEqual(filters.classify("")["outcome"], "drop")
         self.assertEqual(filters.classify("  \n ")["outcome"], "drop")
