@@ -11,7 +11,10 @@ from tests.base import REPO_ROOT
 from tests.stdlib_modules import STDLIB
 
 _CODE_DIRS = ("apprentice", "hooks", "scripts")
-_HOOK_PREFIX = '"${APPRENTICE_PYTHON:-/usr/bin/python3}" -I -S "${CLAUDE_PLUGIN_ROOT}/hooks/capture.py" '
+_HOOK_PREFIX = (
+    '"${APPRENTICE_PYTHON:-/usr/bin/python3}" -I -S -X pycache_prefix="$HOME/.cache/claude-apprentice/pyc" '
+    '"${CLAUDE_PLUGIN_ROOT}/hooks/capture.py" '
+)
 _SESSION_START_CMD = (
     _HOOK_PREFIX + "session-start || { s=$?; printf '%s session-start interpreter-missing: exit %s\\n' "
     '"$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$s" >> "${APPRENTICE_HOME:-$HOME/.claude/apprentice}/hook-errors.log"; } '

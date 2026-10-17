@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${APPRENTICE_PYTHON:-/usr/bin/python3}\" -I -S \"${CLAUDE_PLUGIN_ROOT}/hooks/capture.py\" pre-tool || true",
+            "command": "\"${APPRENTICE_PYTHON:-/usr/bin/python3}\" -I -S -X pycache_prefix=\"$HOME/.cache/claude-apprentice/pyc\" \"${CLAUDE_PLUGIN_ROOT}/hooks/capture.py\" pre-tool || true",
             "timeout": 5
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${APPRENTICE_PYTHON:-/usr/bin/python3}\" -I -S \"${CLAUDE_PLUGIN_ROOT}/hooks/capture.py\" post-tool || true",
+            "command": "\"${APPRENTICE_PYTHON:-/usr/bin/python3}\" -I -S -X pycache_prefix=\"$HOME/.cache/claude-apprentice/pyc\" \"${CLAUDE_PLUGIN_ROOT}/hooks/capture.py\" post-tool || true",
             "timeout": 5,
             "async": true
           }
@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${APPRENTICE_PYTHON:-/usr/bin/python3}\" -I -S \"${CLAUDE_PLUGIN_ROOT}/hooks/capture.py\" user-prompt || true",
+            "command": "\"${APPRENTICE_PYTHON:-/usr/bin/python3}\" -I -S -X pycache_prefix=\"$HOME/.cache/claude-apprentice/pyc\" \"${CLAUDE_PLUGIN_ROOT}/hooks/capture.py\" user-prompt || true",
             "timeout": 5,
             "async": true
           }
@@ -43,7 +43,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${APPRENTICE_PYTHON:-/usr/bin/python3}\" -I -S \"${CLAUDE_PLUGIN_ROOT}/hooks/capture.py\" session-start || { s=$?; printf '%s session-start interpreter-missing: exit %s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"$s\" >> \"${APPRENTICE_HOME:-$HOME/.claude/apprentice}/hook-errors.log\"; } 2>/dev/null || true",
+            "command": "\"${APPRENTICE_PYTHON:-/usr/bin/python3}\" -I -S -X pycache_prefix=\"$HOME/.cache/claude-apprentice/pyc\" \"${CLAUDE_PLUGIN_ROOT}/hooks/capture.py\" session-start || { s=$?; printf '%s session-start interpreter-missing: exit %s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"$s\" >> \"${APPRENTICE_HOME:-$HOME/.claude/apprentice}/hook-errors.log\"; } 2>/dev/null || true",
             "timeout": 5
           }
         ]
