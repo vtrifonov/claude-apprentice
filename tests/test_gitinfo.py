@@ -30,6 +30,34 @@ class GitInfoTest(ApprenticeTestCase):
         t = self.tree
         self.assertEqual(gitinfo.main_checkout(t["sep"]), t["sep"])
 
+    def test_separate_git_dir_named_dot_git_main_is_work_tree(self):
+        work = os.path.join(self.home, "work")
+        store = os.path.join(self.home, "store", "proj", ".git")
+        self.write(os.path.join(store, "config"), "[core]\n\tbare = false\n")
+        self.write(os.path.join(store, "HEAD"), "ref: refs/heads/main\n")
+        self.write(os.path.join(work, ".git"), "gitdir: %s\n" % store)
+        self.assertEqual(gitinfo.main_checkout(work), work)
+        self.assertEqual(gitinfo.exclude_path(work), os.path.join(store, "info", "exclude"))
+
+    def test_paths_are_real_when_reached_through_symlink(self):
+        t = self.tree
+        link = os.path.join(self.home, "link")
+        os.symlink(self.home, link)
+        via = lambda name: os.path.join(link, os.path.relpath(t[name], self.home))  # noqa: E731
+        self.assertEqual(gitinfo.find_git(os.path.join(via("main"), "src")), t["main"])
+        self.assertEqual(gitinfo.main_checkout(via("main")), t["main"])
+        self.assertEqual(gitinfo.main_checkout(via("wt1")), t["main"])
+        self.assertEqual(gitinfo.main_checkout(via("sep")), t["sep"])
+        self.assertEqual(gitinfo.main_checkout(via("sub")), t["sub"])
+        self.assertEqual(gitinfo.worktrees(via("main")), sorted([t["wt1"], t["wt2"]]))
+        self.assertEqual(gitinfo.repo_context(via("wt1"))["root"], t["wt1"])
+        self.assertEqual(gitinfo.repo_context(via("wt1"))["main"], t["main"])
+        self.assertEqual(gitinfo.resolve_main_for_cwd(via("wt1"), "-worktrees"), t["main"])
+        gone_src = os.path.join(via("gone"), "src")
+        self.assertEqual(gitinfo.resolve_main_for_cwd(gone_src, "-worktrees"), t["main"])
+        missing = os.path.join(via("main"), "does", "not", "exist")
+        self.assertEqual(gitinfo.resolve_main_for_cwd(missing, "-worktrees"), t["main"])
+
     def test_origin_https_and_ssh(self):
         t = self.tree
         self.assertEqual(gitinfo.origin(t["main"]), "acme/widgets")

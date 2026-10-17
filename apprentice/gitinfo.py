@@ -53,7 +53,7 @@ def find_git(cwd: str) -> Optional[str]:
         d = os.path.abspath(cwd)
         for _ in range(_MAX_LEVELS + 1):
             if os.path.lexists(os.path.join(d, ".git")):
-                return d
+                return os.path.realpath(d)
             parent = os.path.dirname(d)
             if parent == d:
                 return None
@@ -88,13 +88,14 @@ def main_checkout(d: str) -> Optional[str]:
     if dirs is None:
         return None
     gitdir, commondir = dirs
-    if os.path.basename(commondir) == ".git":
-        return os.path.dirname(commondir)
-    worktree = _parse_config(os.path.join(commondir, "config")).get(("core", ""), {}).get("worktree")
-    if worktree:
-        return _resolve(commondir, worktree)
+    # A separate git dir (or submodule) is its own main, even when its store is named .git.
     if os.path.isfile(os.path.join(d, ".git")) and gitdir == commondir:
         return find_git(d)
+    if os.path.basename(commondir) == ".git":
+        return os.path.realpath(os.path.dirname(commondir))
+    worktree = _parse_config(os.path.join(commondir, "config")).get(("core", ""), {}).get("worktree")
+    if worktree:
+        return os.path.realpath(_resolve(commondir, worktree))
     return None
 
 
@@ -121,7 +122,7 @@ def worktrees(d: str) -> List[str]:
             continue
         wt = os.path.dirname(_resolve(os.path.join(root, name), text.strip()))
         if os.path.isdir(wt):
-            out.append(wt)
+            out.append(os.path.realpath(wt))
     return sorted(out)
 
 
@@ -178,7 +179,7 @@ def resolve_main_for_cwd(cwd: str, worktree_suffix: str) -> Optional[str]:
             if worktree_suffix and name.endswith(worktree_suffix) and len(name) > len(worktree_suffix):
                 candidate = os.path.join(os.path.dirname(parent), name[: -len(worktree_suffix)])
                 if os.path.isdir(candidate):
-                    return candidate
+                    return os.path.realpath(candidate)
             child = parent
         ancestor = os.path.dirname(cwd)
         while not os.path.isdir(ancestor):
