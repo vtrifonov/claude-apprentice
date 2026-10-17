@@ -105,14 +105,58 @@ def _truncate_questions(obj: dict) -> None:
     obj["truncated"] = True
 
 
+def _cut(value, str_cap: int, list_cap: Optional[int]):
+    if isinstance(value, str):
+        return value[:str_cap]
+    if isinstance(value, list):
+        kept = value if list_cap is None else value[:list_cap]
+        return [_cut(v, str_cap, list_cap) for v in kept]
+    if isinstance(value, dict):
+        items = list(value.items())
+        if list_cap is not None:
+            items = items[:list_cap]
+        return {k: _cut(v, str_cap, list_cap) for k, v in items}
+    return value
+
+
+def _cut_strings(obj: dict) -> None:
+    for key in list(obj):
+        obj[key] = _cut(obj[key], QUESTION_CAP, None)
+    obj["truncated"] = True
+
+
+def _keep_first_question(obj: dict) -> None:
+    if isinstance(obj.get("questions"), list):
+        obj["questions"] = obj["questions"][:1]
+    obj["truncated"] = True
+
+
+# Last resort: shrink nested strings and collections until the line fits. Envelope
+# identity fields stay intact so the record remains attributable.
+_KEEP_KEYS = frozenset(("v", "id", "ts", "kind", "source", "fidelity", "session_id", "truncated"))
+_SHRINK_CAPS = ((1000, 20), (500, 10), (200, 5), (50, 2), (0, 1), (0, 0))
+
+
+def _shrink(obj: dict, str_cap: int, list_cap: int) -> dict:
+    out = {}
+    for key, value in obj.items():
+        out[key] = value if key in _KEEP_KEYS else _cut(value, str_cap, list_cap)
+    return out
+
+
 def serialize(obj: dict) -> bytes:
     out = _dump(obj)
     if len(out) <= MAX_LINE_BYTES:
         return out
     obj = copy.deepcopy(obj)
-    for step in (_drop_raw_response, _drop_option_descriptions, _truncate_questions):
+    for step in (_drop_raw_response, _drop_option_descriptions, _truncate_questions, _cut_strings,
+                 _keep_first_question):
         step(obj)
         out = _dump(obj)
+        if len(out) <= MAX_LINE_BYTES:
+            return out
+    for str_cap, list_cap in _SHRINK_CAPS:
+        out = _dump(_shrink(obj, str_cap, list_cap))
         if len(out) <= MAX_LINE_BYTES:
             break
     return out

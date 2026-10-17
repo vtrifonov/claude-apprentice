@@ -112,6 +112,37 @@ class EventsTest(ApprenticeTestCase):
         self.assertEqual(events.serialize(small),
                          (json.dumps(small, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
 
+    def test_serialize_step4_cuts_long_strings(self):
+        q = _question()
+        q["options"][0]["label"] = "L" * 40000
+        out = events.serialize(_ask(questions=[q]))
+        self.assertLessEqual(len(out), _CAP)
+        parsed = json.loads(out.decode("utf-8"))
+        self.assertEqual(len(parsed["questions"][0]["options"][0]["label"]), 2000)
+        self.assertIs(parsed["truncated"], True)
+
+    def test_serialize_step5_keeps_first_question(self):
+        questions = [_question(text="%02d" % i + "q" * 1997) for i in range(20)]
+        out = events.serialize(_ask(questions=questions))
+        self.assertLessEqual(len(out), _CAP)
+        parsed = json.loads(out.decode("utf-8"))
+        self.assertEqual(len(parsed["questions"]), 1)
+        self.assertTrue(parsed["questions"][0]["question"].startswith("00"))
+        self.assertIs(parsed["truncated"], True)
+
+    def test_serialize_always_within_cap(self):
+        q = _question()
+        q["options"] = [{"label": "L" * 1999, "description": "d", "recommended": False}
+                        for _ in range(100)]
+        rec = _ask(questions=[q])
+        rec["numbers_other"] = list(range(20000))
+        out = events.serialize(rec)
+        self.assertLessEqual(len(out), _CAP)
+        parsed = json.loads(out.decode("utf-8"))
+        self.assertIs(parsed["truncated"], True)
+        self.assertEqual(parsed["id"], rec["id"])
+        self.assertEqual(parsed["kind"], "ask")
+
     def test_serialize_lone_surrogate_valid_utf8(self):
         rec = _env("prompt")
         rec["text"] = "hi \ud83d"
