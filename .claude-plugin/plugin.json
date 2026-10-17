@@ -1,0 +1,3 @@
+{"name": "apprentice", "version": "0.1.0",
+ "description": "Learns rules and a writing profile from your own Claude Code sessions. Collects silently, proposes on demand.",
+ "author": {"name": "vtrifonov"}, "license": "MIT"}

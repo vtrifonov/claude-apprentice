@@ -1,0 +1,53 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${APPRENTICE_PYTHON:-/usr/bin/python3}\" -I -S \"${CLAUDE_PLUGIN_ROOT}/hooks/capture.py\" pre-tool || true",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${APPRENTICE_PYTHON:-/usr/bin/python3}\" -I -S \"${CLAUDE_PLUGIN_ROOT}/hooks/capture.py\" post-tool || true",
+            "timeout": 5,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${APPRENTICE_PYTHON:-/usr/bin/python3}\" -I -S \"${CLAUDE_PLUGIN_ROOT}/hooks/capture.py\" user-prompt || true",
+            "timeout": 5,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${APPRENTICE_PYTHON:-/usr/bin/python3}\" -I -S \"${CLAUDE_PLUGIN_ROOT}/hooks/capture.py\" session-start || { s=$?; printf '%s session-start interpreter-missing: exit %s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"$s\" >> \"${APPRENTICE_HOME:-$HOME/.claude/apprentice}/hook-errors.log\"; } 2>/dev/null || true",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
