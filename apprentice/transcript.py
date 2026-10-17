@@ -80,7 +80,11 @@ def tail_context(path: str, current_prompt: Optional[str] = None, nbytes: int = 
             have_entry = True
         kind = obj.get("type")
         if kind == "assistant" and not have_assistant:
-            ctx["prev_assistant"] = _anchor(message_text(obj))
+            # one content block per line: walk back past tool_use/thinking lines to the newest text
+            text = message_text(obj)
+            if text is None:
+                continue
+            ctx["prev_assistant"] = _anchor(text)
             have_assistant = True
         elif kind == "user" and not have_user:
             text = message_text(obj)

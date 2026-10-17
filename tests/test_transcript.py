@@ -150,6 +150,16 @@ class TailContextTest(ApprenticeTestCase):
         self.assertTrue(ctx["after_interrupt"])
         self.assertEqual(ctx["prev_assistant"], "a")
 
+    def test_prev_assistant_walks_back_past_tool_use(self):
+        path = self._path()
+        tool_use = _line("assistant", [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}])
+        tool_result = _line("user", [{"type": "tool_result", "tool_use_id": "t1", "is_error": True, "content": "x"}])
+        self.write(path, _line("user", "go") + _assistant("I will run the build") + tool_use + tool_result
+                   + _line("user", "[Request interrupted by user for tool use]") + _line("user", "use make instead"))
+        ctx = transcript.tail_context(path, current_prompt="use make instead")
+        self.assertEqual(ctx["prev_assistant"], "I will run the build")
+        self.assertTrue(ctx["after_interrupt"])
+
     def test_entrypoint_from_newest_line(self):
         path = self._path()
         self.write(path, _line("user", "a", entrypoint="cli") + _assistant("b", entrypoint="sdk-ts") + _line("user", "c"))
