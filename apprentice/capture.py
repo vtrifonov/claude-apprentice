@@ -10,6 +10,8 @@ from apprentice import asks, config, events, filters, transcript, worktrees
 from apprentice.scrub import scrub
 
 MARKER_CAP = 16384
+MARKER_FIELD_CAP = 200
+MARKER_MIN_FIELD = 100
 REJECT_AFTER_SECONDS = 1.0
 DUPLICATE_WINDOW_SECONDS = 120.0
 RECENT_BYTES = 65536
@@ -73,8 +75,45 @@ def _scrub_value(value, cfg: dict):
     return value
 
 
+def _encode(obj) -> bytes:
+    return json.dumps(obj).encode("utf-8")
+
+
+def _labels(question: dict) -> List[str]:
+    return [o["label"] for o in question.get("options") or [] if isinstance(o, dict) and isinstance(o.get("label"), str)]
+
+
+def _cut_labels_and_headers(questions: list, cap: int) -> None:
+    for q in questions:
+        if isinstance(q.get("header"), str):
+            q["header"] = q["header"][:cap]
+        for opt in q.get("options") or []:
+            if isinstance(opt, dict) and isinstance(opt.get("label"), str):
+                opt["label"] = opt["label"][:cap]
+
+
+def _minimal_marker(marker: dict) -> bytes:
+    small = {"tool_use_id": marker.get("tool_use_id"), "ts": marker.get("ts"), "questions": [], "truncated": True}
+    budget = MARKER_CAP - len(_encode(small))
+    for q in marker["questions"]:
+        header = q.get("header")
+        item = {"header": header[:MARKER_MIN_FIELD] if isinstance(header, str) else None,
+                "options": [{"label": label[:MARKER_MIN_FIELD]} for label in _labels(q)]}
+        # items are joined by ", " in the encoded list
+        size = len(_encode(item)) + 2
+        if size > budget:
+            break
+        small["questions"].append(item)
+        budget -= size
+    data = _encode(small)
+    while len(data) > MARKER_CAP and small["questions"]:
+        small["questions"].pop()
+        data = _encode(small)
+    return data
+
+
 def _capped_marker(marker: dict) -> bytes:
-    data = json.dumps(marker).encode("utf-8")
+    data = _encode(marker)
     if len(data) <= MARKER_CAP:
         return data
     marker = copy.deepcopy(marker)
@@ -85,13 +124,20 @@ def _capped_marker(marker: dict) -> bytes:
                 opt.pop("description", None)
     cap = events.QUESTION_CAP
     while True:
-        data = json.dumps(marker).encode("utf-8")
-        if len(data) <= MARKER_CAP or cap == 0:
+        data = _encode(marker)
+        if len(data) <= MARKER_CAP:
             return data
+        if cap == 0:
+            break
         for q in questions:
             if isinstance(q.get("question"), str):
                 q["question"] = q["question"][:cap]
         cap //= 2
+    _cut_labels_and_headers(questions, MARKER_FIELD_CAP)
+    data = _encode(marker)
+    if len(data) <= MARKER_CAP:
+        return data
+    return _minimal_marker(marker)
 
 
 def _write_atomic(path: str, data: bytes) -> None:

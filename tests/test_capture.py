@@ -81,6 +81,33 @@ class CaptureTest(ApprenticeTestCase):
         self.assertEqual(os.listdir(os.path.dirname(self.marker_path())), ["sess-1.json"])
         self.assertEqual(self.records(), [])
 
+    def test_marker_cap_cuts_labels_and_headers(self):
+        questions = [{"question": "Q%d?" % i, "header": "H" * 3000, "multiSelect": False,
+                      "options": [{"label": "L" * 3000, "description": "d"} for _ in range(4)]} for i in range(4)]
+        self.run_hook("pre-tool", self.payload("pre_tool", tool_use_id="tu1", tool_input={"questions": questions}))
+        self.assertLessEqual(os.path.getsize(self.marker_path()), capture.MARKER_CAP)
+        marker = self.read_marker()
+        self.assertEqual(marker["tool_use_id"], "tu1")
+        self.assertNotIn("truncated", marker)
+        self.assertEqual(len(marker["questions"]), 4)
+        self.assertEqual(len(marker["questions"][0]["header"]), 200)
+        self.assertEqual(len(marker["questions"][0]["options"][0]["label"]), 200)
+
+    def test_marker_cap_minimal_fallback(self):
+        for count in (60, 2000):
+            questions = [{"question": "Q" * 3000, "header": "H" * 3000, "multiSelect": True,
+                          "options": [{"label": "L" * 3000} for _ in range(10)]} for _ in range(count)]
+            marker = {"tool_use_id": "tu1", "ts": _iso(), "questions": questions}
+            data = capture._capped_marker(marker)
+            self.assertLessEqual(len(data), capture.MARKER_CAP, count)
+            small = json.loads(data.decode("utf-8"))
+            self.assertIs(small["truncated"], True)
+            self.assertEqual(small["tool_use_id"], "tu1")
+            self.assertEqual(small["ts"], marker["ts"])
+            for q in small["questions"]:
+                self.assertLessEqual(len(q["header"]), 100)
+                self.assertTrue(all(len(o["label"]) <= 100 for o in q["options"]))
+
     # post-tool
 
     def test_post_tool_ask_event_and_marker_deleted_on_match(self):
