@@ -1,7 +1,11 @@
 """Subprocess-free git helpers: everything is read from plain files, failures yield None or []."""
+from __future__ import annotations
+
 import os
 import re
-from typing import Dict, List, Optional, Tuple
+
+if False:  # annotations only: importing typing costs every hook start
+    from typing import Dict, List, Optional, Tuple
 
 _MAX_LEVELS = 12
 _SECTION_RE = re.compile(r'^\[\s*([^\s\]"]+)(?:\s+"([^"]*)")?\s*\]')

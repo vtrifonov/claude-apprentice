@@ -1,12 +1,17 @@
-"""Ask payload and departure context for AskUserQuestion events."""
+"""Ask payload for AskUserQuestion events."""
+from __future__ import annotations
+
 import json
 import re
-from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Union
+import time
 
-from apprentice import config, gitinfo
-from apprentice.scrub import TICKET_RE, scrub
+from apprentice import config
+from apprentice.scrub import scrub
 from apprentice.transcript import map_answer
+
+if False:  # annotations only: importing typing or datetime costs every hook start
+    from datetime import datetime
+    from typing import Dict, List, Optional, Tuple, Union
 
 _RAW_CAP = 4000
 _NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
@@ -104,16 +109,6 @@ def skill_hint(header: str, question: str, tables: dict) -> Optional[str]:
     return None
 
 
-def find_ticket(*texts: Optional[str]) -> Optional[str]:
-    for text in texts:
-        if not text:
-            continue
-        match = TICKET_RE.search(text)
-        if match:
-            return match.group(0)
-    return None
-
-
 def _scrubbed(text: Optional[str], cfg: dict, flags: List[str]) -> Optional[str]:
     out, got = scrub(text, cfg)
     for flag in got:
@@ -171,7 +166,13 @@ def build_questions(tool_questions: list, answers: Optional[Dict[str, str]], cfg
 
 
 def ask_payload(tool_use_id: str, tool_questions: list, answers: Optional[dict], raw_response,
-                cfg: dict, when_local: datetime) -> Tuple[dict, List[str], bool]:
+                cfg: dict, when_local: Optional[datetime] = None) -> Tuple[dict, List[str], bool]:
+    """when_local defaults to the local wall clock now, read without importing datetime."""
+    if when_local is None:
+        now = time.localtime()
+        hour, weekday = now.tm_hour, now.tm_wday
+    else:
+        hour, weekday = when_local.hour, when_local.weekday()
     flags = []  # type: List[str]
     questions, partial = _build(tool_questions, answers, cfg, flags)
     tables = config.effective_tables(cfg)
@@ -195,20 +196,10 @@ def ask_payload(tool_use_id: str, tool_questions: list, answers: Optional[dict],
         "reset_at": reset_at,
         "risk_words": sorted(present),
         "risk_words_negated": sorted(negated - present),
-        "hour_local": when_local.hour,
-        "weekday": when_local.weekday(),
+        "hour_local": hour,
+        "weekday": weekday,
     }
     if raw_response is not None:
         raw = raw_response if isinstance(raw_response, str) else json.dumps(raw_response)
         payload["raw_response"] = (_scrubbed(raw, cfg, flags) or "")[:_RAW_CAP]
     return payload, flags, partial
-
-
-def departure_context(cwd: Optional[str], *texts: Optional[str]) -> dict:
-    ctx = gitinfo.repo_context(cwd) if cwd else {}
-    branch = ctx.get("branch")
-    return {
-        "repo": ctx.get("repo"),
-        "branch": branch,
-        "ticket": find_ticket(branch, cwd, *texts),
-    }

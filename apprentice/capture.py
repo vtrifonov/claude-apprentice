@@ -1,13 +1,18 @@
-"""Hook handlers for PreToolUse, PostToolUse, UserPromptSubmit and SessionStart."""
-import copy
-import datetime
+"""Hook handlers for PreToolUse, PostToolUse, UserPromptSubmit and SessionStart.
+
+Every hook run is a fresh interpreter, so each handler imports only the apprentice modules its event needs.
+"""
+from __future__ import annotations
+
 import json
 import os
 import re
-from typing import List, Mapping, Optional, Tuple
+import time
 
-from apprentice import asks, config, events, filters, transcript, worktrees
-from apprentice.scrub import scrub
+from apprentice import config, events
+
+if False:  # annotations only: importing typing costs every hook start
+    from typing import List, Mapping, Optional, Tuple
 
 MARKER_CAP = 16384
 MARKER_FIELD_CAP = 200
@@ -39,6 +44,7 @@ def resolve_entrypoint(payload: dict, env: Mapping, transcript_path: Optional[st
     if value:
         return value
     if read_tail and transcript_path:
+        from apprentice import transcript
         return transcript.tail_context(transcript_path, None, POST_TAIL_BYTES)["entrypoint"]
     return None
 
@@ -66,6 +72,7 @@ def _question_texts(questions: list) -> List[str]:
 
 
 def _scrub_value(value, cfg: dict):
+    from apprentice.scrub import scrub
     if isinstance(value, str):
         return scrub(value, cfg)[0]
     if isinstance(value, list):
@@ -116,7 +123,7 @@ def _capped_marker(marker: dict) -> bytes:
     data = _encode(marker)
     if len(data) <= MARKER_CAP:
         return data
-    marker = copy.deepcopy(marker)
+    marker = json.loads(data)  # a fresh copy to cut down; copy would cost every hook start
     questions = marker["questions"]
     for q in questions:
         for opt in q.get("options") or []:
@@ -144,10 +151,14 @@ def _write_atomic(path: str, data: bytes) -> None:
     tmp = "%s.%d.tmp" % (path, os.getpid())
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        os.write(fd, data)
-    finally:
-        os.close(fd)
-    os.replace(tmp, path)
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+    except BaseException:
+        _remove(tmp)
+        raise
 
 
 def _read_marker(path: str) -> Optional[dict]:
@@ -168,8 +179,9 @@ def _remove(path: str) -> None:
 
 def _envelope(kind: str, payload: dict, env: Mapping, entrypoint: Optional[str],
               flags: List[str], *texts: Optional[str]) -> dict:
+    from apprentice.departure import departure_context
     cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
-    ctx = asks.departure_context(cwd, *texts)
+    ctx = departure_context(cwd, *texts)
     return events.envelope(kind, "hook", payload.get("session_id") or "", config.current_profile(env),
                            entrypoint, cwd, ctx["repo"], ctx["branch"], ctx["ticket"],
                            payload.get("transcript_path"), flags=flags)
@@ -197,6 +209,7 @@ def handle_pre_tool(payload: dict, env: Mapping, home_dir: str, cfg: dict) -> Op
 
 
 def handle_post_tool(payload: dict, env: Mapping, home_dir: str, cfg: dict) -> Optional[str]:
+    from apprentice import asks, transcript
     path = payload.get("transcript_path")
     entrypoint = resolve_entrypoint(payload, env, path, True)
     capture, flags = should_capture(entrypoint, payload, cfg)
@@ -207,8 +220,7 @@ def handle_post_tool(payload: dict, env: Mapping, home_dir: str, cfg: dict) -> O
     questions = _questions(payload)
     response = payload.get("tool_response")
     answers = transcript.parse_ask_answer(response)
-    ask, scrub_flags, partial = asks.ask_payload(tool_use_id, questions, answers, response, cfg,
-                                                 datetime.datetime.now())
+    ask, scrub_flags, partial = asks.ask_payload(tool_use_id, questions, answers, response, cfg)
     _merge_flags(flags, scrub_flags)
     record = _envelope("ask", payload, env, entrypoint, flags, *_question_texts(questions))
     if partial:
@@ -222,15 +234,15 @@ def handle_post_tool(payload: dict, env: Mapping, home_dir: str, cfg: dict) -> O
     return None
 
 
-def _age_seconds(ts, now: datetime.datetime) -> Optional[float]:
-    parsed = config.parse_iso(ts) if isinstance(ts, str) else None
-    if parsed is None:
+def _age_seconds(ts, now: float) -> Optional[float]:
+    epoch = config.ts_epoch(ts)
+    if epoch is None:
         return None
-    return (now - parsed).total_seconds()
+    return now - epoch
 
 
 def _check_rejected(payload: dict, env: Mapping, home_dir: str, cfg: dict, entrypoint: Optional[str],
-                    flags: List[str], recent: List[dict], now: datetime.datetime) -> bool:
+                    flags: List[str], recent: List[dict], now: float) -> bool:
     marker_path = pending_path(home_dir, payload.get("session_id"))
     marker = _read_marker(marker_path)
     if marker is None:
@@ -242,8 +254,9 @@ def _check_rejected(payload: dict, env: Mapping, home_dir: str, cfg: dict, entry
     if any(e.get("kind") == "ask" and e.get("tool_use_id") == tool_use_id for e in recent):
         _remove(marker_path)
         return False
+    from apprentice import asks
     questions = [q for q in marker.get("questions") or [] if isinstance(q, dict)]
-    body, scrub_flags, _ = asks.ask_payload(tool_use_id, questions, None, None, cfg, datetime.datetime.now())
+    body, scrub_flags, _ = asks.ask_payload(tool_use_id, questions, None, None, cfg)
     record_flags = list(flags)
     _merge_flags(record_flags, scrub_flags)
     record = _envelope("ask_rejected", payload, env, entrypoint, record_flags, *_question_texts(questions))
@@ -254,12 +267,14 @@ def _check_rejected(payload: dict, env: Mapping, home_dir: str, cfg: dict, entry
 
 
 def _text_was_cut(event: dict) -> bool:
+    from apprentice import filters
     tags = event.get("tags")
     length = event.get("len")
     return (isinstance(tags, list) and "pasted" in tags) or (isinstance(length, int) and length > filters.TEXT_CAP)
 
 
-def _duplicate_of(record: dict, recent: List[dict], now: datetime.datetime) -> Optional[str]:
+def _duplicate_of(record: dict, recent: List[dict], now: float) -> Optional[str]:
+    from apprentice import filters
     text = record.get("text")
     if text is None:
         return None
@@ -281,6 +296,8 @@ def _duplicate_of(record: dict, recent: List[dict], now: datetime.datetime) -> O
 
 
 def handle_user_prompt(payload: dict, env: Mapping, home_dir: str, cfg: dict) -> Optional[str]:
+    from apprentice import filters, transcript
+    from apprentice.scrub import scrub
     path = payload.get("transcript_path")
     prompt = payload.get("prompt")
     if not isinstance(prompt, str):
@@ -291,7 +308,7 @@ def handle_user_prompt(payload: dict, env: Mapping, home_dir: str, cfg: dict) ->
     if not capture:
         return None
     config.ensure_dirs(home_dir)
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = time.time()
     recent = events.tail_events(events.events_path(home_dir, config.utc_now_iso()), RECENT_BYTES)
     after_rejected = _check_rejected(payload, env, home_dir, cfg, entrypoint, flags, recent, now)
     result = filters.classify(prompt)
@@ -328,13 +345,13 @@ _MARKER_MAX_AGE = 3600
 
 
 def _utc_month_index() -> int:
-    now = datetime.datetime.now(datetime.timezone.utc)
-    return now.year * 12 + now.month - 1
+    now = time.gmtime()
+    return now.tm_year * 12 + now.tm_mon - 1
 
 
 def _prune_events(home_dir: str, retention_months: int) -> None:
-    now = datetime.datetime.now(datetime.timezone.utc)
-    current = os.path.join(home_dir, "events", "%04d-%02d.jsonl" % (now.year, now.month))
+    now = time.gmtime()
+    current = os.path.join(home_dir, "events", "%04d-%02d.jsonl" % (now.tm_year, now.tm_mon))
     if not os.path.exists(current):
         fd = os.open(current, os.O_WRONLY | os.O_CREAT, 0o600)
         os.close(fd)
@@ -364,7 +381,7 @@ def _truncate_error_log(home_dir: str) -> None:
 
 def _prune_markers(home_dir: str) -> None:
     folder = os.path.join(home_dir, "state", "pending-ask")
-    limit = datetime.datetime.now().timestamp() - _MARKER_MAX_AGE
+    limit = time.time() - _MARKER_MAX_AGE
     try:
         names = os.listdir(folder)
     except OSError:
@@ -389,6 +406,7 @@ def _housekeep(home_dir: str, label: str, step, *args) -> None:
 
 
 def handle_session_start(payload: dict, env: Mapping, home_dir: str, cfg: dict) -> Optional[str]:
+    from apprentice import worktrees
     _housekeep(home_dir, "ensure-dirs", config.ensure_dirs, home_dir)
     _housekeep(home_dir, "prune-events", _prune_events, home_dir, cfg["retention_months"])
     _housekeep(home_dir, "truncate-error-log", _truncate_error_log, home_dir)

@@ -1,6 +1,10 @@
+from __future__ import annotations
+
 import hashlib
 import re
-from typing import Dict, List, Optional
+
+if False:  # annotations only: importing typing costs every hook start
+    from typing import Dict, List, Optional
 
 TEXT_CAP = 4000
 PASTED_CAP = 300

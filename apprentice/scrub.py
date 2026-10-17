@@ -1,5 +1,9 @@
+from __future__ import annotations
+
 import re
-from typing import List, Optional, Tuple
+
+if False:  # annotations only: importing typing costs every hook start
+    from typing import List, Optional, Tuple
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)")
 TICKET_RE = re.compile(r"\b[A-Z]{2,}-\d+\b")

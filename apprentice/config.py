@@ -1,9 +1,15 @@
+from __future__ import annotations
+
 import os
 import json
 import re
-import datetime
 import fcntl
-from typing import Dict, List, Mapping, Optional, Tuple
+import stat
+import time
+
+if False:  # annotations only: importing typing or datetime costs every hook start
+    import datetime
+    from typing import Dict, List, Mapping, Optional, Tuple
 
 DEFAULTS = {
     "display_name": "the user",
@@ -41,27 +47,45 @@ RISK_WORDS = ["auth", "trust", "security", "prod", "production", "migration", "p
 NEGATIONS = ("no", "not", "without")
 
 _PCT = r"(\d+(?:\.\d+)?)"
-NUMBER_EXTRACTORS = [
-    (re.compile(_PCT + r"%\s*(?:of\s+(?:the\s+)?weekly(?:\s+limit)?\s+)?used", re.I), "used_pct", "number"),
-    (re.compile(r"used\s+" + _PCT + "%", re.I), "used_pct", "number"),
-    (re.compile(r"weekly\s+usage(?:\s+is)?\s+" + _PCT + "%", re.I), "used_pct", "number"),
-    (re.compile(_PCT + r"%\s*(?:/\s*day|per\s+day)", re.I), "per_day_pct", "number"),
-    (re.compile(r"(\d+)\s+working\s+days?\s+(?:left|until)", re.I), "working_days_left", "number"),
-    (re.compile(r"(\d+)\s+(?:changed\s+)?lines\b", re.I), "lines", "number"),
-    (re.compile(r"(\d+)\s+files\b", re.I), "files", "number"),
-    (re.compile(r"(\d+(?:\.\d+)?)\s*KB\b", re.I), "kb", "number"),
-    (re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)=([^\s,;)]+)", re.I), "KEYVAL", "auto"),
-]  # type: List[Tuple[object, str, str]]
-
-RESET_AT_RE = re.compile(
-    r"\breset(?:s)?\s+(?:at\s+|on\s+)?(\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?(?:\s*[+-]\d{2}:?\d{2}|Z)?)?)",
-    re.I)
+# NUMBER_EXTRACTORS and RESET_AT_RE compile on first use (see __getattr__): only ask events need them.
+_NUMBER_EXTRACTOR_SOURCES = [
+    (_PCT + r"%\s*(?:of\s+(?:the\s+)?weekly(?:\s+limit)?\s+)?used", "used_pct", "number"),
+    (r"used\s+" + _PCT + "%", "used_pct", "number"),
+    (r"weekly\s+usage(?:\s+is)?\s+" + _PCT + "%", "used_pct", "number"),
+    (_PCT + r"%\s*(?:/\s*day|per\s+day)", "per_day_pct", "number"),
+    (r"(\d+)\s+working\s+days?\s+(?:left|until)", "working_days_left", "number"),
+    (r"(\d+)\s+(?:changed\s+)?lines\b", "lines", "number"),
+    (r"(\d+)\s+files\b", "files", "number"),
+    (r"(\d+(?:\.\d+)?)\s*KB\b", "kb", "number"),
+    (r"\b([A-Za-z_][A-Za-z0-9_]*)=([^\s,;)]+)", "KEYVAL", "auto"),
+]  # type: List[Tuple[str, str, str]]
+_RESET_AT_SOURCE = (
+    r"\breset(?:s)?\s+(?:at\s+|on\s+)?(\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?(?:\s*[+-]\d{2}:?\d{2}|Z)?)?)")
 PHASE_WORDS = ["shepherd", "checkpoint", "panel", "lane", "quick mode"]
 STRONG_MARKERS = ["but i said", "i thought we", "store in your memory", "remember to",
                   "remember that", "from now on"]
 
 _RESERVED_GROUP_RE = re.compile(r"^group-\d+$")
 _HINT_FIELDS = ("stem", "header_or_stem", "both")
+_OWN_TS_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{3})Z$")
+
+
+def _compiled(name: str):
+    value = globals().get(name)
+    if value is not None:
+        return value
+    if name == "NUMBER_EXTRACTORS":
+        value = [(re.compile(source, re.I), key, kind) for source, key, kind in _NUMBER_EXTRACTOR_SOURCES]
+    elif name == "RESET_AT_RE":
+        value = re.compile(_RESET_AT_SOURCE, re.I)
+    else:
+        raise AttributeError("module %r has no attribute %r" % (__name__, name))
+    globals()[name] = value
+    return value
+
+
+def __getattr__(name: str):
+    return _compiled(name)
 
 
 def home() -> str:
@@ -71,20 +95,60 @@ def home() -> str:
     return os.path.expanduser(os.path.join("~", ".claude", "apprentice"))
 
 
+def _is_private_dir(path: str) -> bool:
+    try:
+        mode = os.stat(path).st_mode
+    except OSError:
+        return False
+    return stat.S_ISDIR(mode) and stat.S_IMODE(mode) == 0o700
+
+
 def ensure_dirs(home_dir: str) -> None:
     os.makedirs(home_dir, mode=0o700, exist_ok=True)
     for sub in _DIRS:
         path = os.path.join(home_dir, sub)
+        # every hook calls this: one stat when the tree is already in place instead of mkdir, stat and chmod
+        if _is_private_dir(path):
+            continue
         os.makedirs(path, mode=0o700, exist_ok=True)
         os.chmod(path, 0o700)
 
 
 def utc_now_iso() -> str:
-    now = datetime.datetime.now(datetime.timezone.utc)
-    return now.strftime("%Y-%m-%dT%H:%M:%S.") + "%03dZ" % (now.microsecond // 1000)
+    seconds, micros = divmod(int(round(time.time() * 1000000)), 1000000)
+    return time.strftime("%Y-%m-%dT%H:%M:%S.", time.gmtime(seconds)) + "%03dZ" % (micros // 1000)
+
+
+def _days_from_civil(year: int, month: int, day: int) -> int:
+    # days since 1970-01-01 in the proleptic Gregorian calendar (H. Hinnant's algorithm)
+    year -= month <= 2
+    era = year // 400
+    yoe = year - era * 400
+    doy = (153 * (month + (-3 if month > 2 else 9)) + 2) // 5 + day - 1
+    return era * 146097 + yoe * 365 + yoe // 4 - yoe // 100 + doy - 719468
+
+
+def ts_epoch(ts) -> Optional[float]:
+    """Seconds since the epoch for an ISO timestamp, or None when it does not parse.
+
+    The utc_now_iso format is read without datetime, which costs every hook start; anything else goes
+    through parse_iso.
+    """
+    if not isinstance(ts, str):
+        return None
+    match = _OWN_TS_RE.match(ts)
+    if match:
+        year, month, day, hour, minute, second, millis = (int(g) for g in match.groups())
+        whole = _days_from_civil(year, month, day) * 86400 + hour * 3600 + minute * 60 + second
+        # out-of-range fields would wrap silently; let parse_iso reject them instead
+        if year >= 1 and time.gmtime(whole)[:6] == (year, month, day, hour, minute, second):
+            return whole + millis / 1000.0
+    parsed = parse_iso(ts)
+    return parsed.timestamp() if parsed is not None else None
 
 
 def parse_iso(ts: str) -> Optional[datetime.datetime]:
+    import datetime
     try:
         text = ts.strip()
         if text.endswith("Z") or text.endswith("z"):
@@ -222,7 +286,7 @@ def text_visible(event_profile: str, current_group: Optional[str], cfg: dict,
 
 def _warn_once_per_day(home_dir: str, message: str) -> None:
     try:
-        day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+        day = time.strftime("%Y-%m-%d", time.gmtime())
         state = os.path.join(home_dir, "state")
         os.makedirs(state, mode=0o700, exist_ok=True)
         guard = os.path.join(state, "config-warned-" + day)
@@ -326,7 +390,7 @@ def effective_tables(cfg: dict) -> dict:
             extractors.append((re.compile(item["regex"], re.I), item["name"], item["type"]))
         except re.error:
             continue
-    extractors.extend(NUMBER_EXTRACTORS)
+    extractors.extend(_compiled("NUMBER_EXTRACTORS"))
     risk = list(RISK_WORDS) + [w for w in listed("risk_words") if isinstance(w, str)]
     phase = list(PHASE_WORDS) + [w for w in listed("phase_words") if isinstance(w, str)]
     return {

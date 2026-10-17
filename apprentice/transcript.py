@@ -1,8 +1,12 @@
+from __future__ import annotations
+
 import json
 import re
-from typing import Dict, Iterator, List, Optional, Tuple
 
 from apprentice.scrub import scrub
+
+if False:  # annotations only: importing typing costs every hook start
+    from typing import Dict, Iterator, List, Optional, Tuple
 
 PAIR_RE = re.compile(r'"((?:[^"\\]|\\.)*)"="((?:[^"\\]|\\.)*)"')
 

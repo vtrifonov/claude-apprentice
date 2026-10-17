@@ -1,7 +1,7 @@
 import datetime
 import json
 
-from apprentice import asks, config
+from apprentice import asks, config, departure
 from tests.base import ApprenticeTestCase
 from tests.fixtures import worktrees
 
@@ -114,14 +114,14 @@ class AsksTest(ApprenticeTestCase):
         self.assertIsNone(asks.skill_hint("Colour", "Which colour do you prefer?", _tables()))
 
     def test_ticket_precedence(self):
-        self.assertEqual(asks.find_ticket(None, "see XX-123 and YY-9", "ZZ-5"), "XX-123")
-        self.assertIsNone(asks.find_ticket("nothing", None))
+        self.assertEqual(departure.find_ticket(None, "see XX-123 and YY-9", "ZZ-5"), "XX-123")
+        self.assertIsNone(departure.find_ticket("nothing", None))
         tree = worktrees.build(self.home)
-        ctx = asks.departure_context(tree["wt1"], "AB-77")
+        ctx = departure.departure_context(tree["wt1"], "AB-77")
         self.assertEqual(ctx["ticket"], "XX-123")
-        ctx = asks.departure_context(tree["main"] + "/CD-5", "AB-77")
+        ctx = departure.departure_context(tree["main"] + "/CD-5", "AB-77")
         self.assertEqual(ctx["ticket"], "CD-5")
-        self.assertEqual(asks.departure_context(None, "AB-77")["ticket"], "AB-77")
+        self.assertEqual(departure.departure_context(None, "AB-77")["ticket"], "AB-77")
 
     def test_build_questions_partial_and_no_options(self):
         questions = [
@@ -166,7 +166,7 @@ class AsksTest(ApprenticeTestCase):
 
     def test_departure_context_from_worktree_fixture(self):
         tree = worktrees.build(self.home)
-        ctx = asks.departure_context(tree["wt1"])
+        ctx = departure.departure_context(tree["wt1"])
         self.assertEqual(ctx, {"repo": "acme/widgets", "branch": "feat/XX-123-x", "ticket": "XX-123"})
-        none_ctx = asks.departure_context(None)
+        none_ctx = departure.departure_context(None)
         self.assertEqual(none_ctx, {"repo": None, "branch": None, "ticket": None})

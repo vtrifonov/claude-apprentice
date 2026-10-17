@@ -121,6 +121,12 @@ class SessionStartTest(ApprenticeTestCase):
         self.assertEqual(len(lines), 1)
         self.assertIn("session-start", lines[0])
 
+    def test_plugin_root_blocked_leaves_no_tmp_file(self):
+        config.ensure_dirs(self.home)
+        os.makedirs(self.p("state", "plugin-root"))
+        self.start()
+        self.assertEqual([n for n in os.listdir(self.p("state")) if n.endswith(".tmp")], [])
+
     def test_every_housekeeping_step_failing_keeps_link_and_tone(self):
         tree = tree_fixture.build(self.fake_home)
         self.write(os.path.join(tree["main"], _NAME), "# alice rules\n")

@@ -1,12 +1,15 @@
-import copy
+from __future__ import annotations
+
 import fcntl
 import json
 import os
 import re
 import time
-from typing import Callable, Dict, Iterator, List, Optional
 
 from apprentice import SCHEMA_VERSION, config
+
+if False:  # annotations only: importing typing costs every hook start
+    from typing import Callable, Dict, Iterator, List, Optional
 
 MAX_LINE_BYTES = 32768
 QUESTION_CAP = 2000
@@ -55,10 +58,8 @@ def envelope(kind: str, source: str, session_id: str, profile: str, entrypoint: 
 
 
 def month_of(ts: str) -> str:
-    parsed = config.parse_iso(ts)
-    if parsed is None:
-        parsed = config.parse_iso(config.utc_now_iso())
-    return parsed.strftime("%Y-%m")
+    epoch = config.ts_epoch(ts)
+    return time.strftime("%Y-%m", time.gmtime(time.time() if epoch is None else epoch))
 
 
 def events_path(home_dir: str, ts: str) -> str:
@@ -148,7 +149,8 @@ def serialize(obj: dict) -> bytes:
     out = _dump(obj)
     if len(out) <= MAX_LINE_BYTES:
         return out
-    obj = copy.deepcopy(obj)
+    # a JSON round-trip is the deep copy: the record is plain JSON data, and copy costs every hook start
+    obj = json.loads(json.dumps(obj))
     for step in (_drop_raw_response, _drop_option_descriptions, _truncate_questions, _cut_strings,
                  _keep_first_question):
         step(obj)

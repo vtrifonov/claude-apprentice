@@ -1,8 +1,12 @@
 """Link a linked worktree's CLAUDE.local.md to the main checkout's copy, only when git already ignores it."""
+from __future__ import annotations
+
 import os
-from typing import Optional, Tuple
 
 from apprentice import gitinfo
+
+if False:  # annotations only: importing typing costs every hook start
+    from typing import Optional, Tuple
 
 LOCAL_NAME = "CLAUDE.local.md"
 CONTENT_CAP = 8192
