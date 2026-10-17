@@ -305,6 +305,21 @@ class CaptureTest(ApprenticeTestCase):
         self.assertIsNone(self.run_hook("session-start", self.payload("session_start")))
         self.assertTrue(os.path.isdir(os.path.join(self.home, "events")))
 
+    def test_wrongly_typed_payload_fields_treated_as_missing(self):
+        payload = {"session_id": 5, "cwd": 7, "transcript_path": ["a"], "prompt": "Please add a widget cache"}
+        self.assertIsNone(self.run_hook("user-prompt", payload))
+        (rec,) = self.records()
+        self.assertEqual(rec["kind"], "prompt")
+        self.assertEqual(rec["session_id"], "")
+        self.assertIsNone(rec["cwd"])
+        self.assertIsNone(rec["transcript_path"])
+        self.assertIsNone(rec["prev_assistant"])
+        post = self.payload("post_tool_dict", tool_use_id="tu1", session_id=5, cwd=7, transcript_path=["a"])
+        self.assertIsNone(self.run_hook("post-tool", post, {"APPRENTICE_HOME": self.home}))
+        self.assertEqual([r["kind"] for r in self.records()], ["prompt", "ask"])
+        self.assertIsNone(self.records()[-1]["transcript_path"])
+        self.assertFalse(os.path.exists(os.path.join(self.home, "hook-errors.log")))
+
     def test_unknown_event_returns_none(self):
         self.assertIsNone(self.run_hook("bogus", {}))
 

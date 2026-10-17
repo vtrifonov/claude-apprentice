@@ -170,7 +170,7 @@ def _envelope(kind: str, payload: dict, env: Mapping, entrypoint: Optional[str],
               flags: List[str], *texts: Optional[str]) -> dict:
     cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
     ctx = asks.departure_context(cwd, *texts)
-    return events.envelope(kind, "hook", str(payload.get("session_id") or ""), config.current_profile(env),
+    return events.envelope(kind, "hook", payload.get("session_id") or "", config.current_profile(env),
                            entrypoint, cwd, ctx["repo"], ctx["branch"], ctx["ticket"],
                            payload.get("transcript_path"), flags=flags)
 
@@ -424,9 +424,19 @@ _HANDLERS = {
 }
 
 
+def _normalized(payload: dict) -> dict:
+    # a wrongly typed field is treated as missing rather than aborting the hook
+    out = dict(payload)
+    for key in ("transcript_path", "cwd", "session_id"):
+        if not isinstance(out.get(key), str):
+            out[key] = None
+    return out
+
+
 def handle(event: str, payload: dict, env: Mapping) -> Optional[str]:
     handler = _HANDLERS.get(event)
     if handler is None:
         return None
+    payload = _normalized(payload)
     home_dir = _home(env)
     return handler(payload, env, home_dir, config.load_config(home_dir))
