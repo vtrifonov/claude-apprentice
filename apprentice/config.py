@@ -1,8 +1,6 @@
 import os
-import sys
 import json
 import re
-import time
 import datetime
 import fcntl
 from typing import Dict, List, Mapping, Optional, Tuple
@@ -103,7 +101,8 @@ def log_error(event: str, message: str, home_dir: Optional[str] = None) -> None:
     try:
         base = home_dir if home_dir is not None else home()
         ts = utc_now_iso()
-        msg = str(message)[:300]
+        msg = " ".join(str(message).split())[:300]
+        event = "-".join(str(event).split())
         os.makedirs(base, mode=0o700, exist_ok=True)
         line = ("%s %s %s\n" % (ts, event, msg)).encode("utf-8", "replace")
         fd = os.open(os.path.join(base, "hook-errors.log"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
@@ -139,7 +138,8 @@ def current_profile(env: Optional[Mapping] = None) -> str:
     default_dir = os.path.realpath(os.path.expanduser(os.path.join("~", ".claude")))
     if os.path.realpath(os.path.expanduser(stripped)) == default_dir:
         return "default"
-    return os.path.basename(stripped) or "default"
+    base = os.path.basename(stripped) or "default"
+    return "unknown-dir" if base == "unknown" else base
 
 
 def _labels_file(home_dir: str) -> str:
@@ -163,6 +163,16 @@ def assign_group_labels(home_dir: str, first_seen: Dict[str, str]) -> Dict[str, 
     lock_fd = os.open(os.path.join(state, "group-labels.lock"), os.O_WRONLY | os.O_CREAT, 0o600)
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        if os.path.exists(_labels_file(home_dir)):
+            try:
+                with open(_labels_file(home_dir), "r", encoding="utf-8") as fh:
+                    parsed = json.load(fh)
+                if not isinstance(parsed, dict):
+                    raise ValueError("not an object")
+            except Exception:
+                log_error("distill", "group-labels.json unreadable, not assigning labels (rule: group-labels-corrupt)",
+                          home_dir)
+                return {}
         labels = read_group_labels(home_dir)
         highest = 0
         for label in labels.values():
@@ -248,7 +258,7 @@ def _account_groups_problem(groups) -> Optional[str]:
             return "slug-collision"
         slugs.add(slug)
     for name in groups:
-        if _RESERVED_GROUP_RE.match(name):
+        if _RESERVED_GROUP_RE.match(name) or _RESERVED_GROUP_RE.match(group_slug(name)):
             return "reserved-group-name"
     return None
 
@@ -299,13 +309,17 @@ def load_config(home_dir: Optional[str] = None) -> dict:
 
 
 def effective_tables(cfg: dict) -> dict:
+    def listed(key: str) -> list:
+        value = cfg.get(key)
+        return value if isinstance(value, list) else []
+
     hints = list(SKILL_HINTS)
-    for item in cfg.get("skill_hints") or []:
+    for item in listed("skill_hints"):
         if (isinstance(item, dict) and isinstance(item.get("phrase"), str)
                 and item.get("fields") in _HINT_FIELDS and isinstance(item.get("skill"), str)):
             hints.append((item["phrase"], item["fields"], item["skill"]))
     extractors = []
-    for item in cfg.get("number_patterns") or []:
+    for item in listed("number_patterns"):
         if not (isinstance(item, dict) and all(isinstance(item.get(k), str) for k in ("regex", "name", "type"))):
             continue
         try:
@@ -313,8 +327,8 @@ def effective_tables(cfg: dict) -> dict:
         except re.error:
             continue
     extractors.extend(NUMBER_EXTRACTORS)
-    risk = list(RISK_WORDS) + [w for w in (cfg.get("risk_words") or []) if isinstance(w, str)]
-    phase = list(PHASE_WORDS) + [w for w in (cfg.get("phase_words") or []) if isinstance(w, str)]
+    risk = list(RISK_WORDS) + [w for w in listed("risk_words") if isinstance(w, str)]
+    phase = list(PHASE_WORDS) + [w for w in listed("phase_words") if isinstance(w, str)]
     return {
         "skill_hints": hints,
         "number_extractors": extractors,

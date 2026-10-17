@@ -92,6 +92,9 @@ class StaticGateTest(unittest.TestCase):
                             bad.append("%s:%d builtin %s()" % (rel, line, func.id))
                         if func.id == "zip" and any(k.arg == "strict" for k in node.keywords):
                             bad.append("%s:%d zip(strict=)" % (rel, line))
+                if isinstance(node, ast.ImportFrom) and node.module == "datetime":
+                    if any(a.name == "UTC" for a in node.names):
+                        bad.append("%s:%d from datetime import UTC" % (rel, line))
                 if isinstance(node, ast.Attribute):
                     if node.attr in ("stdlib_module_names", "bit_count"):
                         bad.append("%s:%d attribute %s" % (rel, line, node.attr))

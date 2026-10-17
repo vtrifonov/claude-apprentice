@@ -109,6 +109,31 @@ class ConfigTest(ApprenticeTestCase):
         self.assertIn("reserved-group-name", lines[0])
         self.assertNotIn("group-1", lines[0])
 
+    def test_account_groups_reserved_name_checked_on_slug_and_case(self):
+        self._write_config({"account_groups": {"Group-1": ["p1"]}})
+        self.assertEqual(config.load_config()["account_groups"], {})
+        lines = self._log_lines()
+        self.assertEqual(len(lines), 1)
+        self.assertIn("reserved-group-name", lines[0])
+
+    def test_log_error_collapses_whitespace_and_sanitizes_event(self):
+        config.log_error(" ev ent\n", "a\nb\r\n c")
+        lines = self._log_lines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0].split(" ", 2)[1:], ["ev-ent", "a b c"])
+
+    def test_effective_tables_ignores_non_list_options(self):
+        cfg = config.load_config()
+        cfg["risk_words"] = "auth"
+        cfg["phase_words"] = {"ab": 1}
+        cfg["skill_hints"] = "xyz"
+        cfg["number_patterns"] = "xyz"
+        tables = config.effective_tables(cfg)
+        self.assertEqual(tables["risk_words"], config.RISK_WORDS)
+        self.assertEqual(tables["phase_words"], config.PHASE_WORDS)
+        self.assertEqual(tables["skill_hints"], config.SKILL_HINTS)
+        self.assertEqual(len(tables["number_extractors"]), 9)
+
     def test_group_slug(self):
         self.assertEqual(config.group_slug("Work Team/EU"), "work-team-eu")
         self.assertEqual(config.group_slug("-x"), "x")

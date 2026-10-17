@@ -25,6 +25,27 @@ class ConfigGroupsTest(ApprenticeTestCase):
         env = {"CLAUDE_CONFIG_DIR": "/x/.claude-acme-alice/"}
         self.assertEqual(config.current_profile(env), ".claude-acme-alice")
 
+    def test_current_profile_never_returns_unknown(self):
+        self.assertEqual(config.current_profile({"CLAUDE_CONFIG_DIR": "/x/unknown"}), "unknown-dir")
+
+    def test_assign_labels_name_tie_break(self):
+        seen = {"p_b": "2026-01-01T00:00:00Z", "p_a": "2026-01-01T00:00:00Z"}
+        self.assertEqual(config.assign_group_labels(self.home, seen), {"p_a": "group-1", "p_b": "group-2"})
+
+    def test_assign_labels_corrupt_file_logs_and_does_not_renumber(self):
+        self.write(self._labels_path(), "{not json")
+        labels = config.assign_group_labels(self.home, {"p_a": "2026-01-01T00:00:00Z"})
+        self.assertEqual(labels, {})
+        with open(self._labels_path(), "r", encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "{not json")
+        with open(os.path.join(self.home, "hook-errors.log"), "r", encoding="utf-8") as fh:
+            self.assertIn("group-labels-corrupt", fh.read())
+
+    def test_group_profiles_filters_explicit_profile_with_label(self):
+        cfg = {"account_groups": {"team": ["p1"]}, "unknown_group": None}
+        labels = {"p1": "group-1", "p3": "group-1"}
+        self.assertEqual(config.group_profiles("group-1", cfg, labels), ["p3"])
+
     def test_assign_labels_first_seen_order(self):
         seen = {"p_b": "2026-02-01T00:00:00Z", "p_a": "2026-01-01T00:00:00Z"}
         labels = config.assign_group_labels(self.home, seen)
