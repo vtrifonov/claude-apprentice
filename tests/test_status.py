@@ -156,6 +156,28 @@ class EnablementTest(StatusTestBase):
         self.event(profile="default", ts=_iso(self.now - _HOUR))
         self.assertNotIn("STALE", " ".join(self.row(self.report(), "default")))
 
+    def test_shared_projects_use_profile_rules(self):
+        self.profile_dir(".claude", enabled=True)
+        bob = self.profile_dir(".claude-acme-bob", enabled=True)
+        shared = os.path.join(self.fake_home, ".claude", "projects")
+        os.symlink(shared, os.path.join(bob, "projects"))
+        for name, cwd, age in (("home.jsonl", "/home/alice/personal/x", 0),
+                               ("work.jsonl", "/home/alice/work/acme", 48 * _HOUR)):
+            path = self.write(os.path.join(shared, "slug", name),
+                              json.dumps({"type": "user", "cwd": cwd, "message": {"content": "hi"}}) + "\n")
+            os.utime(path, (self.now - age, self.now - age))
+        self.event(profile="default", ts=_iso(self.now))
+        self.event(profile=".claude-acme-bob", ts=_iso(self.now - 47 * _HOUR))
+        self.assertIn("STALE", " ".join(self.row(self.report(), ".claude-acme-bob")))
+        self.write(os.path.join(self.home, "config.json"), json.dumps({"profile_rules": [
+            {"cwd_prefix": "/home/alice/work", "profile": ".claude-acme-bob"},
+            {"cwd_prefix": "/home/alice/personal", "profile": "default"}]}))
+        text = self.report()
+        bob_row = self.row(text, ".claude-acme-bob")
+        self.assertNotIn("STALE", " ".join(bob_row))
+        self.assertIn(_iso(self.now - 48 * _HOUR)[:19] + "Z", bob_row)
+        self.assertIn(_iso(self.now)[:19] + "Z", self.row(text, "default"))
+
     def test_interpreter_missing_first_and_replaces_stale(self):
         self.profile_dir(".claude", enabled=True, transcript_age=0)
         self.event(profile="default", ts=_iso(self.now - 48 * _HOUR))
@@ -194,6 +216,7 @@ class GroupsTest(StatusTestBase):
     def test_unknown_group_line(self):
         self.event(profile="unknown", source="backfill")
         self.assertIn("unknown text withheld", self.report())
+        self.assertNotIn("no label yet: events", self.report())
         self.write(os.path.join(self.home, "config.json"),
                    json.dumps({"account_groups": {"work": ["alice"]}, "unknown_group": "work"}))
         text = self.report()

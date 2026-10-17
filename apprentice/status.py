@@ -77,14 +77,14 @@ def _profile_name(path: str) -> str:
     return "default" if base == ".claude" else base
 
 
-def _newest_transcript(profile_dir: str) -> Optional[float]:
+def _transcripts(profile_dir: str, seen: set) -> List[tuple]:
+    """(realpath, mtime) of each transcript under `<profile_dir>/projects` not already in `seen`."""
     root = os.path.realpath(os.path.join(profile_dir, "projects"))
     try:
         slugs = os.listdir(root)
     except OSError:
-        return None
-    seen = set()
-    newest = None
+        return []
+    out = []
     for slug in slugs:
         folder = os.path.join(root, slug)
         try:
@@ -99,11 +99,28 @@ def _newest_transcript(profile_dir: str) -> Optional[float]:
                 continue
             seen.add(path)
             try:
-                mtime = os.stat(path).st_mtime
+                out.append((path, os.stat(path).st_mtime))
             except OSError:
                 continue
-            if newest is None or mtime > newest:
-                newest = mtime
+    return out
+
+
+def _newest_transcript(profile_dir: str) -> Optional[float]:
+    return max((mtime for _path, mtime in _transcripts(profile_dir, set())), default=None)
+
+
+def _newest_transcript_by_rule(dirs: List[str], cfg: dict) -> Dict[str, float]:
+    """Newest transcript per profile name, from each file's head `cwd` and `profile_rules`: profiles may
+    share one projects/ directory."""
+    from apprentice import backfill
+    seen = set()  # type: set
+    newest = {}  # type: Dict[str, float]
+    for profile_dir in dirs:
+        for path, mtime in _transcripts(profile_dir, seen):
+            cwd = next((o["cwd"] for o in backfill._head_lines(path) if isinstance(o.get("cwd"), str)), None)
+            name = backfill._profile_for(cwd, cfg)
+            if mtime > newest.get(name, 0.0):
+                newest[name] = mtime
     return newest
 
 
@@ -234,7 +251,9 @@ def _group_lines(home_dir: str, env: Mapping, cfg: dict, tally: _Tally) -> List[
     for name, count in tally.by_profile.items():
         group = config.group_of_profile(name, cfg, labels)
         if group is None:
-            unlabelled += count
+            # unknown is never labelled; the withheld line below reports it
+            if name != "unknown":
+                unlabelled += count
         else:
             per_group[group] = per_group.get(group, 0) + count
     names |= set(per_group)
@@ -278,14 +297,16 @@ def _retention_lines(home_dir: str, cfg: dict) -> List[str]:
             % (months, index // 12, index % 12 + 1, oldest)]
 
 
-def _enablement_lines(home_dir_for_profiles: str, tally: _Tally, missing: bool) -> List[str]:
+def _enablement_lines(home_dir_for_profiles: str, cfg: dict, tally: _Tally, missing: bool) -> List[str]:
     rows = []
     commands = []
-    for path in profile_dirs(home_dir_for_profiles):
+    dirs = profile_dirs(home_dir_for_profiles)
+    by_rule = _newest_transcript_by_rule(dirs, cfg) if cfg.get("profile_rules") else None
+    for path in dirs:
         name = _profile_name(path)
         enabled = plugin_enabled(os.path.join(path, "settings.json"))
         live = tally.newest_hook.get(name)
-        transcript = _newest_transcript(path)
+        transcript = by_rule.get(name) if by_rule is not None else _newest_transcript(path)
         flags = []
         if enabled is False:
             flags.append("NOT ENABLED")
@@ -347,5 +368,5 @@ def report(home: str, env: Mapping, home_dir_for_profiles: Optional[str] = None)
     out.extend(_retention_lines(home, cfg))
     out.append("")
     out.append("profile enablement:")
-    out.extend(_enablement_lines(real_home, tally, missing))
+    out.extend(_enablement_lines(real_home, cfg, tally, missing))
     return "\n".join(out) + "\n"
