@@ -179,6 +179,14 @@ class FiltersTest(ApprenticeTestCase):
         self.assertEqual(result["text"], text)
         self.assertLessEqual(len(result["text"]), 4000)
 
+    def test_lone_surrogate_does_not_raise(self):
+        text = "hi \ud83d there"
+        result = filters.classify(text)
+        self.assertEqual(result["outcome"], "prompt")
+        self.assertEqual(result["sha1"],
+                         hashlib.sha1(text.encode("utf-8", "surrogatepass")).hexdigest())
+        self.assertEqual(len(filters.normalized_sha1(text)), 40)
+
     def test_normalized_sha1_collapses_ws(self):
         self.assertEqual(filters.normalized_sha1("  Hello \n  World "),
                          filters.normalized_sha1("hello world"))

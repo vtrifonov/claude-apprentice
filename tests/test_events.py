@@ -112,6 +112,16 @@ class EventsTest(ApprenticeTestCase):
         self.assertEqual(events.serialize(small),
                          (json.dumps(small, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
 
+    def test_serialize_lone_surrogate_valid_utf8(self):
+        rec = _env("prompt")
+        rec["text"] = "hi \ud83d"
+        out = events.serialize(rec)
+        parsed = json.loads(out.decode("utf-8"))
+        self.assertEqual(parsed["text"], "hi ?")
+        path = os.path.join(self.home, "s.jsonl")
+        events.append(path, rec)
+        self.assertEqual(len(list(events.tail_events(path))), 1)
+
     def test_append_creates_0600(self):
         path = os.path.join(self.home, "events", "2026-10.jsonl")
         os.makedirs(os.path.dirname(path))

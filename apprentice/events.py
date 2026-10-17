@@ -75,7 +75,7 @@ def month_files(home_dir: str) -> List[str]:
 
 
 def _dump(obj: dict) -> bytes:
-    return (json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    return (json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8", "replace")
 
 
 def _questions(obj: dict) -> list:

@@ -38,7 +38,7 @@ _STRONG_RE = _phrases(
 
 
 def _sha1(text: str) -> str:
-    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+    return hashlib.sha1(text.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def normalized_sha1(text: str) -> str:
