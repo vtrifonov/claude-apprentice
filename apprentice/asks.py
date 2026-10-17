@@ -35,6 +35,9 @@ def extract_numbers(text: str, tables: dict) -> Tuple[Dict[str, Union[float, str
         for found in list(regex.finditer(text)):
             if name == "KEYVAL":
                 key, raw = found.group(1).lower(), found.group(2)
+                if raw.startswith("<redacted"):
+                    text = _blank(text, found.span())
+                    continue
                 value = _to_float(raw)  # type: Union[float, str, None]
                 if value is None:
                     value = raw

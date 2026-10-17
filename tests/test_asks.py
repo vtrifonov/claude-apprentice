@@ -55,6 +55,14 @@ class AsksTest(ApprenticeTestCase):
         numbers, _, _ = asks.extract_numbers("available (pace=tight)", _tables())
         self.assertEqual(numbers, {"pace": "tight"})
 
+    def test_redacted_keyval_skipped(self):
+        questions = [_q("Raise max_tokens=4096 and token_budget=50000 for 3 files?", [{"label": "Yes"}])]
+        payload, _, _ = asks.ask_payload("t1", questions, None, None, _cfg(), datetime.datetime(2030, 1, 7, 9))
+        self.assertNotIn("max_tokens", payload["numbers"])
+        self.assertNotIn("token_budget", payload["numbers"])
+        self.assertEqual(payload["numbers"], {"files": 3.0})
+        self.assertEqual(payload["numbers_other"], [])
+
     def test_lines_files_kb(self):
         numbers, other, _ = asks.extract_numbers("120 changed lines in 7 files, 3.5 KB", _tables())
         self.assertEqual(numbers, {"lines": 120.0, "files": 7.0, "kb": 3.5})
