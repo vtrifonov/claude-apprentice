@@ -5,7 +5,7 @@ import re
 import time
 import datetime
 import fcntl
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Tuple
 
 DEFAULTS = {
     "display_name": "the user",
@@ -126,6 +126,88 @@ def log_error(event: str, message: str, home_dir: Optional[str] = None) -> None:
 
 def group_slug(name: str) -> str:
     return re.sub(r"[^a-z0-9_-]", "-", name.lower()).lstrip("-")
+
+
+def current_profile(env: Optional[Mapping] = None) -> str:
+    source = os.environ if env is None else env
+    raw = source.get("CLAUDE_CONFIG_DIR") or ""
+    if not raw:
+        return "default"
+    stripped = raw.rstrip("/")
+    if not stripped:
+        return "default"
+    default_dir = os.path.realpath(os.path.expanduser(os.path.join("~", ".claude")))
+    if os.path.realpath(os.path.expanduser(stripped)) == default_dir:
+        return "default"
+    return os.path.basename(stripped) or "default"
+
+
+def _labels_file(home_dir: str) -> str:
+    return os.path.join(home_dir, "state", "group-labels.json")
+
+
+def read_group_labels(home_dir: str) -> Dict[str, str]:
+    try:
+        with open(_labels_file(home_dir), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
+
+
+def assign_group_labels(home_dir: str, first_seen: Dict[str, str]) -> Dict[str, str]:
+    state = os.path.join(home_dir, "state")
+    os.makedirs(state, mode=0o700, exist_ok=True)
+    lock_fd = os.open(os.path.join(state, "group-labels.lock"), os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        labels = read_group_labels(home_dir)
+        highest = 0
+        for label in labels.values():
+            if _RESERVED_GROUP_RE.match(label):
+                highest = max(highest, int(label.split("-", 1)[1]))
+        fresh = sorted((p for p in first_seen if p not in labels),
+                       key=lambda p: (first_seen[p], p))
+        if not fresh:
+            return labels
+        for profile in fresh:
+            highest += 1
+            labels[profile] = "group-%d" % highest
+        tmp = os.path.join(state, "group-labels.json.%d.tmp" % os.getpid())
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, json.dumps(labels, sort_keys=True).encode("utf-8"))
+        finally:
+            os.close(fd)
+        os.replace(tmp, _labels_file(home_dir))
+        return labels
+    finally:
+        os.close(lock_fd)
+
+
+def group_of_profile(profile: str, cfg: dict, labels: Dict[str, str]) -> Optional[str]:
+    if profile == "unknown":
+        return cfg.get("unknown_group")
+    for name, profiles in (cfg.get("account_groups") or {}).items():
+        if profile in profiles:
+            return name
+    return labels.get(profile)
+
+
+def group_profiles(group: str, cfg: dict, labels: Dict[str, str]) -> List[str]:
+    explicit = (cfg.get("account_groups") or {}).get(group)
+    if explicit is not None:
+        return list(explicit)
+    return sorted(p for p, label in labels.items() if label == group and group_of_profile(p, cfg, labels) == group)
+
+
+def text_visible(event_profile: str, current_group: Optional[str], cfg: dict,
+                 labels: Dict[str, str]) -> bool:
+    if current_group is None:
+        return False
+    return group_of_profile(event_profile, cfg, labels) == current_group
 
 
 def _warn_once_per_day(home_dir: str, message: str) -> None:
