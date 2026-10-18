@@ -26,6 +26,7 @@ DEFAULTS = {
     "public_skills": [],
     "worktree_suffix": "-worktrees",
     "extra_redact_patterns": [],
+    "machine_prompt_patterns": [],
     "retention_months": 24,
 }
 
@@ -369,7 +370,21 @@ def load_config(home_dir: Optional[str] = None) -> dict:
     if not isinstance(entry, list) or not all(isinstance(e, str) for e in entry):
         cfg["capture_entrypoints"] = list(DEFAULTS["capture_entrypoints"])
         _warn_once_per_day(base, "capture_entrypoints invalid (rule: capture-entrypoints)")
+
+    patterns = cfg["machine_prompt_patterns"]
+    valid = [p for p in patterns if isinstance(p, str) and _compiles(p)] if isinstance(patterns, list) else []
+    if not isinstance(patterns, list) or len(valid) != len(patterns):
+        _warn_once_per_day(base, "machine_prompt_patterns: invalid entries ignored (rule: machine-prompt-patterns)")
+    cfg["machine_prompt_patterns"] = valid
     return cfg
+
+
+def _compiles(pattern: str) -> bool:
+    try:
+        re.compile(pattern)
+    except re.error:
+        return False
+    return True
 
 
 def effective_tables(cfg: dict) -> dict:

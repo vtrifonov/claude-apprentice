@@ -161,6 +161,7 @@ Event fields are in [docs/record-schema.md](docs/record-schema.md), hook input s
 
 - Stored: AskUserQuestion questions, options and answers; your prompt text (at most 4,000 characters, or 300 for a pasted prompt); and a short assistant text before a correction (at most 400 characters). Nothing else. No tool output, no file contents, no assistant replies.
 - Every free-text field goes through a scrubber before it is written. Add your own regexes (employer, customer, service names) to `extra_redact_patterns`.
+- Prompts you did not type are never stored: relayed agent messages, expanded skill bodies, task notifications and usage-limit notes. Add your own with `machine_prompt_patterns`.
 - Counts and aggregates use every profile. Verbatim text enters a review pack or a tone file only from the current account group, so one account's wording never shows up in another's.
 - Emails stay on your machine. Anything that leaves it (preclassify, the review model) has them masked.
 - Hooks never fail a session: they exit 0, print nothing except the two SessionStart cases, and log one line to `hook-errors.log`.
@@ -186,7 +187,8 @@ Cost, measured during a test run on a busy machine: post-tool hook median 56.2 m
 ```json
 {
   "account_groups": {"<group A>": ["<profile 1>", "<profile 2>"], "<group B>": ["default"]},
-  "unknown_group": "<group A>"
+  "unknown_group": "<group A>",
+  "machine_prompt_patterns": ["^Heartbeat for "]
 }
 ```
 
@@ -201,6 +203,7 @@ Real group, profile and employer names never go into a committed file. Keep conf
 | `capture_entrypoints` | `["cli", "claude-desktop"]` | Entrypoints the hooks capture. Headless `sdk-cli` sessions are skipped. |
 | `retention_months` | `24` | Event files older than this many months are deleted at session start and skipped by backfill. |
 | `extra_redact_patterns` | `[]` | Extra regexes the scrubber and the apply check treat as sensitive. |
+| `machine_prompt_patterns` | `[]` | Extra regexes for prompts you did not type (searched in the stripped prompt text). A match is never stored, and stored matches are skipped by distill, tone and preclassify. Relayed agent messages, skill bodies, task notifications and usage-limit notes are built in. Example: `["^Heartbeat for "]` for prompts a scheduled wakeup replays. |
 | `display_name` | `the user` | Name the tone pointer uses. Set by the `/apprentice:tone` picker while unset; a non-string value counts as unset. |
 | `own_email_domains` | `[]` | Email domains the scrubber treats as your own. |
 | `skill_hints`, `number_patterns`, `header_aliases`, `risk_words`, `phase_words` | built-in | Extend the built-in tables used to attribute and classify questions. |

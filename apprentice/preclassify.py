@@ -5,7 +5,7 @@ import re
 import subprocess
 from typing import Callable, Dict, List, Optional
 
-from apprentice import cluster, config, scrub
+from apprentice import cluster, config, filters, scrub
 
 PROMPT_MARKER = "[apprentice-preclassify v1]"
 PROMPT_TEMPLATE = (
@@ -87,11 +87,13 @@ def write_cache(home: str, event_id: str, item: dict, model: str) -> None:
     os.replace(tmp, path)
 
 
-def select_uncached(events: List[dict], home: str, profile: str) -> List[dict]:
-    """Pairs of this profile's prompts with no cache file. The profile filter runs before the pair limit."""
+def select_uncached(events: List[dict], home: str, profile: str, cfg: Optional[dict] = None) -> List[dict]:
+    """Pairs of this profile's prompts with no cache file, machine prompts left out. The profile filter runs
+    before the pair limit."""
     if profile == "unknown":
         return []
-    mine = [event for event in events if event.get("profile") == profile]
+    mine = [event for event in events if event.get("profile") == profile
+            and not (event.get("kind") == "prompt" and filters.is_machine_prompt(event.get("text"), cfg))]
     pairs = cluster.select_pairs(mine)
     return [pair for pair in pairs
             if _safe_id(pair["event"].get("id")) and isinstance(pair["event"].get("text"), str)

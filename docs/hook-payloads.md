@@ -90,6 +90,23 @@ from the `len` and `words` counts, and keeps `sha1` on the raw prompt.
 
 An image-only prompt has `text: null` and the `image_only` tag.
 
+## Prompts the user did not type
+
+UserPromptSubmit and transcript user lines also carry text the harness wrote into the user turn. The capture and
+the backfill drop these with no event; distill, tone and preclassify skip any already stored.
+
+- Text patterns, anchored at the start of the stripped prompt: `Another Claude session sent a message`,
+  `Base directory for this skill:`, `(Re-invocation of /`, `[Usage limit reached`,
+  `[Earlier usage-limit notes no longer apply`, `Continue from where you left off.`, `<task-notification>`,
+  `<<autonomous-loop`. A `<teammate-message`, `<agent-message`, `<cross-session-message` or
+  `<task-notification` tag anywhere also counts. `machine_prompt_patterns` in config.json adds more, for example
+  `^Heartbeat for `.
+- Transcript markers, backfill only: `isMeta: true` (skill bodies, usage-limit notes, scheduled prompts),
+  `promptSource: "system"` (task notifications, scheduled prompts) or an `origin.kind` other than `human`. A typed
+  prompt has `promptSource: "typed"` and `origin.kind: "human"`. A relayed agent message has no marker; it lacks
+  `origin` and `promptSource`, as older transcripts do, so only its text identifies it.
+- No UserPromptSubmit payload seen so far carries such a field, so the hook relies on the text patterns.
+
 ## Entrypoint
 
 `CLAUDE_CODE_ENTRYPOINT` is `cli` on every live interactive event. A payload `entrypoint` field wins when

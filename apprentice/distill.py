@@ -11,7 +11,8 @@ import re
 from collections import Counter
 from typing import Dict, List, Mapping, Optional, Tuple
 
-from apprentice import SCHEMA_VERSION, audit, cluster, confidence, config, departures, events, gitinfo, ledger
+from apprentice import SCHEMA_VERSION, audit, cluster, confidence, config, departures, events, filters, gitinfo
+from apprentice import ledger
 from apprentice import scope as scoping
 from apprentice.scrub import mask_outbound
 
@@ -62,9 +63,11 @@ def _is_image_only(event: dict) -> bool:
     return bool(event.get("image_only")) or "image_only" in (event.get("tags") or []) or event.get("text") is None
 
 
-def _dropped(event: dict, entrypoints: set) -> bool:
+def _dropped(event: dict, entrypoints: set, cfg: dict) -> bool:
     kind = event.get("kind")
     if kind == "machine":
+        return True
+    if kind == "prompt" and filters.is_machine_prompt(event.get("text"), cfg):
         return True
     entry = event.get("entrypoint")
     if entry is not None and entry not in entrypoints:
@@ -77,7 +80,7 @@ def _dropped(event: dict, entrypoints: set) -> bool:
 def clean(events_in: List[dict], cfg: dict, current_group: Optional[str], labels: Dict[str, str]) -> List[dict]:
     """Drop noise, apply the live-coverage watermark, dedup backfill copies and tag visibility; input is untouched."""
     entrypoints = set(cfg.get("capture_entrypoints") or [])
-    kept = [event for event in events_in if not _dropped(event, entrypoints)]
+    kept = [event for event in events_in if not _dropped(event, entrypoints, cfg)]
     first_hook = {}  # type: Dict[str, float]
     for event in kept:
         epoch = config.ts_epoch(event.get("ts"))
@@ -308,7 +311,7 @@ class _Run(object):
             evidence = scoping._evidence_repos(kind, found)
             if not (evidence and None not in evidence and "" not in evidence and len(set(evidence)) == 1):
                 main = scoping.names_repo_artifact(scoping._visible_text(kind, found), mains)
-                named = gitinfo.origin(main) if main else None
+                named = resolver.origin(main) if main else None
                 repos = [named] if named else []
             if repos:
                 info = resolver.repo_target(visible_cwds, repos[0], text_visible)

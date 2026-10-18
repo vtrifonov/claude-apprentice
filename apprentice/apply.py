@@ -363,23 +363,39 @@ def _excluded(root: str, path: str) -> Optional[bool]:
     return any(worktrees.is_exclude_line(line) for line in (text or "").splitlines())
 
 
-def inspect_target(path: str, cfg: dict, timeout: float = 5.0) -> dict:
+def _git_info(real: str, timeout: float, cache: Optional[dict]) -> dict:
+    """The git part of `inspect_target`, memoized in `cache` (one per pack build): by realpath, and the
+    `gh repo view` answer by remote, so a build asks gh once per distinct remote."""
+    by_path = cache.setdefault("inspect", {}) if cache is not None else {}
+    if real in by_path:
+        return dict(by_path[real])
+    root = _find_repo_root(real)
+    info = {"tracked": False, "root": None, "remote": None, "visibility": None, "excluded": None}
+    if root is not None:
+        info["tracked"] = True
+        info["root"] = root
+        info["remote"] = gitinfo.origin(root)
+        by_remote = cache.setdefault("visibility", {}) if cache is not None else {}
+        if info["remote"] not in by_remote:
+            by_remote[info["remote"]] = _visibility(info["remote"], timeout)
+        info["visibility"] = by_remote[info["remote"]]
+        info["excluded"] = _excluded(root, real)
+    by_path[real] = dict(info)
+    return info
+
+
+def inspect_target(path: str, cfg: dict, timeout: float = 5.0, cache: Optional[dict] = None) -> dict:
     """Describe where a target file lives.
 
     `tracked` here means the file sits inside a git work tree (a `.git` is found above its realpath), the
     "tracked in <root>" sense used for skills. It is not `gitinfo.is_tracked`, which asks whether a file is in
     the index and is what decides CLAUDE.local.md. Public-mirror skills are also reported as tracked.
+    `cache` is a dict owned by the caller for one run; never share it across processes.
     """
     real = os.path.realpath(path)
-    root = _find_repo_root(real)
-    info = {"tracked": False, "root": None, "remote": None, "visibility": None,
-            "public_mirror": False, "excluded": None}
-    if root is not None:
-        info["tracked"] = True
-        info["root"] = root
-        info["remote"] = gitinfo.origin(root)
-        info["visibility"] = _visibility(info["remote"], timeout)
-        info["excluded"] = _excluded(root, real)
+    git = _git_info(real, timeout, cache)
+    info = {"tracked": git["tracked"], "root": git["root"], "remote": git["remote"],
+            "visibility": git["visibility"], "public_mirror": False, "excluded": git["excluded"]}
     if os.path.basename(real) == "SKILL.md" and os.path.basename(os.path.dirname(path)) in (cfg.get("public_skills") or []):
         info["tracked"] = True
         info["visibility"] = "public"

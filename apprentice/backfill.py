@@ -221,10 +221,23 @@ def _ask_event(line: _Line, pending: dict, answers: Optional[Dict[str, str]], re
     return record
 
 
+def _structured_machine(obj: dict) -> bool:
+    """A transcript user line the harness marks as not typed: `isMeta` (skill bodies, usage notes, scheduled
+    prompts), `promptSource` "system" (task notifications, scheduled prompts) or a non-human `origin.kind`."""
+    if obj.get("isMeta") is True or obj.get("promptSource") == "system":
+        return True
+    origin = obj.get("origin")
+    kind = origin.get("kind") if isinstance(origin, dict) else None
+    return isinstance(kind, str) and kind != "human"
+
+
 def _prompt_event(line: _Line, text: str, state: FileState, was_rejected: bool,
                   outcomes: Optional[Dict[str, int]]) -> Optional[dict]:
     if text.startswith(_INTERRUPT_PREFIX):
         _count(outcomes, "interrupt")
+        return None
+    if _structured_machine(line.obj) or filters.is_machine_prompt(text, line.cfg):
+        _count(outcomes, "machine_prompt")
         return None
     result = filters.classify(text)
     _count(outcomes, result["outcome"])
@@ -768,6 +781,7 @@ def _run_locked(args, env, log: Callable[[str], None], home_dir: str, started: f
             print(text, flush=True)
     return {"exit": 0, "files_scanned": scanned, "files_total": len(paths), "skipped": skipped,
             "unchanged": unchanged, "errors": errors, "events_by_kind": by_kind, "events_by_project": by_project,
-            "filter_outcomes": outcomes, "events_written": written,
+            "filter_outcomes": outcomes, "machine_prompts_skipped": outcomes.get("machine_prompt", 0),
+            "events_written": written,
             "dropped": dict(index.dropped), "duplicates": duplicates, "bytes_read": bytes_read,
             "elapsed": elapsed, "interrupted": interrupted, "dry_run": dry, "line": line}

@@ -188,6 +188,13 @@ class TargetResolver:
         self._profile_dirs = None  # type: Optional[List[str]]
         self._global_git = None  # type: Optional[dict]
         self._global_git_done = False
+        self._inspect_cache = {}  # type: dict
+        self._origins = {}  # type: Dict[str, Optional[str]]
+
+    def origin(self, main: str) -> Optional[str]:
+        if main not in self._origins:
+            self._origins[main] = gitinfo.origin(main)
+        return self._origins[main]
 
     def _tracked(self, main: str) -> Optional[bool]:
         if main not in self.tracked_cache:
@@ -199,7 +206,7 @@ class TargetResolver:
         suffix = self.cfg.get("worktree_suffix") or ""
         for cwd in cwds_newest_first:
             main = gitinfo.resolve_main_for_cwd(cwd, suffix)
-            if main is None or not os.path.isdir(main) or gitinfo.origin(main) != repo:
+            if main is None or not os.path.isdir(main) or self.origin(main) != repo:
                 continue
             tracked = self._tracked(main)
             if tracked is True:
@@ -220,7 +227,7 @@ class TargetResolver:
             return {"name": name, "target": self.global_target()["target"],
                     "target_status": "rescoped-readonly", "target_git": self.global_git()}
         target = os.path.join(directory, "SKILL.md")
-        info = apply.inspect_target(target, self.cfg)
+        info = apply.inspect_target(target, self.cfg, cache=self._inspect_cache)
         git = {key: info[key] for key in _GIT_FIELDS if key in info}
         if not info["tracked"]:
             git.pop("visibility", None)
@@ -247,7 +254,7 @@ class TargetResolver:
         config repo), so the tracked block, `--confirm-tracked` and `recommend` apply to it; else None."""
         if not self._global_git_done:
             target = self.global_target()["target"]
-            info = apply.inspect_target(target, self.cfg)
+            info = apply.inspect_target(target, self.cfg, cache=self._inspect_cache)
             self._global_git = {key: info[key] for key in _GIT_FIELDS if key in info} if info["tracked"] else None
             self._global_git_done = True
         return self._global_git

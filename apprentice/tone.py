@@ -19,7 +19,7 @@ import string
 from collections import Counter
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
-from apprentice import apply, cluster, config, distill, events, lexicon, tmpfiles
+from apprentice import apply, cluster, config, distill, events, filters, lexicon, tmpfiles
 from apprentice.scrub import EMAIL_RE, TICKET_RE, UUID_RE, mask_outbound, scrub
 
 PRECISION = 6
@@ -78,11 +78,14 @@ def _text(prompt: dict) -> str:
 
 
 def eligible_prompts(events: Iterable[dict], cfg: Optional[dict] = None) -> List[dict]:
-    """Prompts usable for tone: not pasted, image-only or duplicates, from a capturing (or unknown) entrypoint."""
+    """Prompts usable for tone: not pasted, image-only, duplicates or machine prompts, from a capturing (or
+    unknown) entrypoint."""
     entrypoints = (cfg or config.DEFAULTS)["capture_entrypoints"]
     out = []
     for event in events:
         if event.get("kind") != "prompt" or event.get("text") is None:
+            continue
+        if filters.is_machine_prompt(event["text"], cfg):
             continue
         tags = event.get("tags") or []
         if "pasted" in tags or "image_only" in tags or event.get("pasted") or event.get("image_only"):

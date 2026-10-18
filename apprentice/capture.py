@@ -305,7 +305,7 @@ def handle_user_prompt(payload: dict, env: Mapping, home_dir: str, cfg: dict) ->
     tail = transcript.tail_context(path or "", prompt, cfg=cfg)
     entrypoint = resolve_entrypoint(payload, env, path, False) or tail["entrypoint"]
     capture, flags = should_capture(entrypoint, payload, cfg)
-    if not capture:
+    if not capture or filters.is_machine_prompt(prompt, cfg):
         return None
     config.ensure_dirs(home_dir)
     now = time.time()

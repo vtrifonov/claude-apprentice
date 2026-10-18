@@ -38,7 +38,8 @@ def main(argv) -> int:
     config.ensure_dirs(home_dir)
     found = [event for event in events.iter_events(home_dir)
              if args.since is None or events.month_of(event.get("ts") or "") >= args.since]
-    pairs = preclassify.select_uncached(found, home_dir, config.current_profile(os.environ))
+    pairs = preclassify.select_uncached(found, home_dir, config.current_profile(os.environ),
+                                        config.load_config(home_dir))
     summary = preclassify.run_batches(pairs, home_dir, os.environ, args.max_batches, _log)
     line = "preclassify: %d batches, %d cached, %d skipped" % (summary["batches"], summary["cached"],
                                                               summary["skipped"])

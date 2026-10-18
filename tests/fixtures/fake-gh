@@ -1,5 +1,9 @@
 #!/bin/sh
 # Stand-in for gh: FAKE_GH_MODE=public|private|sleep|missing-json answers `repo view --json visibility`.
+# FAKE_GH_LOG, when set, gets one line of arguments per call.
+if [ -n "${FAKE_GH_LOG:-}" ]; then
+    printf '%s\n' "$*" >> "$FAKE_GH_LOG"
+fi
 case "${FAKE_GH_MODE:-}" in
     public) printf '{"visibility": "PUBLIC"}\n'; exit 0 ;;
     private) printf '{"visibility": "PRIVATE"}\n'; exit 0 ;;

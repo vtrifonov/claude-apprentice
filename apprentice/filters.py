@@ -21,6 +21,13 @@ _PASTE_LINE_RE = re.compile(r"(?:>|```|[ \t]+at |[ \t]*File \"|Traceback)")
 _PASTE_LINES = 3
 _PASTED_MARKER = "<pasted_content id="
 _PASTED_TAG_RE = re.compile(r"</?pasted_content\b[^>]*>")
+# Prompts the harness writes into the user turn: relayed agent messages, expanded skill bodies, scheduler and
+# usage-limit notes. Anchored at the start of the stripped text; the tags count anywhere.
+_MACHINE_PREFIX_RE = re.compile(
+    r"^(?:Another Claude session sent a message\b|Base directory for this skill:|\(Re-invocation of /"
+    r"|\[Usage limit reached\b|\[Earlier usage-limit notes no longer apply\b|Continue from where you left off\."
+    r"|<task-notification>|<<autonomous-loop)")
+_MACHINE_TAG_RE = re.compile(r"<(?:teammate-message|agent-message|cross-session-message|task-notification)\b")
 _ACK_RE = re.compile(r"^(continue|go on|resume|retry|go|yep|yes|ok|sure|post|approve)\W*$",
                      re.IGNORECASE)
 
@@ -100,6 +107,22 @@ def _register(tags: List[str], text: str) -> str:
     if text.strip().endswith("?"):
         return "question"
     return "direction"
+
+
+def is_machine_prompt(text: Optional[str], cfg: Optional[dict] = None) -> bool:
+    """True for a prompt the user did not type: a built-in pattern or a `machine_prompt_patterns` regex."""
+    if not isinstance(text, str):
+        return False
+    stripped = text.strip()
+    if _MACHINE_PREFIX_RE.match(stripped) or _MACHINE_TAG_RE.search(text):
+        return True
+    for raw in (cfg or {}).get("machine_prompt_patterns") or []:
+        try:
+            if isinstance(raw, str) and re.search(raw, stripped):
+                return True
+        except re.error:
+            continue
+    return False
 
 
 def classify(text: str) -> Dict:

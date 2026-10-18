@@ -312,7 +312,7 @@ class BackfillTest(ApprenticeTestCase):
         for name in ("plain.jsonl", "relay.jsonl", "compact.jsonl", "interrupt.jsonl"):
             list(backfill.extract_file(_fixture(name), backfill.FileState(), self.cfg, None, None, {},
                                        entrypoint="cli", outcomes=outcomes))
-        self.assertEqual(outcomes, {"prompt": 4, "drop": 1, "machine": 1, "interrupt": 1})
+        self.assertEqual(outcomes, {"prompt": 4, "machine_prompt": 1, "machine": 1, "interrupt": 1})
 
     def test_pending_asks_capped_at_twenty(self):
         uses = []

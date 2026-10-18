@@ -44,7 +44,7 @@ class ConfigTest(ApprenticeTestCase):
             "display_name", "own_email_domains", "skill_hints", "number_patterns",
             "header_aliases", "risk_words", "phase_words", "capture_entrypoints",
             "profile_rules", "account_groups", "unknown_group", "public_skills",
-            "worktree_suffix", "extra_redact_patterns", "retention_months"]))
+            "worktree_suffix", "extra_redact_patterns", "machine_prompt_patterns", "retention_months"]))
         self.assertEqual(config.DEFAULTS["display_name"], "the user")
         self.assertEqual(config.DEFAULTS["capture_entrypoints"], ["cli", "claude-desktop"])
         self.assertEqual(config.DEFAULTS["worktree_suffix"], "-worktrees")

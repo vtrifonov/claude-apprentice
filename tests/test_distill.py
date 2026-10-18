@@ -8,7 +8,7 @@ from unittest import mock
 
 from apprentice import cluster, config, departures, distill, events, ledger, scope
 from tests.base import REPO_ROOT, ApprenticeTestCase, isolated_env
-from tests.fixtures import worktrees
+from tests.fixtures import skills, worktrees
 from tests.fixtures.events import profiles
 from tests.fixtures.events.asks import ask_event
 from tests.fixtures.events.profiles import MODEL_LABELS, MODE_LABELS, ts
@@ -662,6 +662,30 @@ class ReviewB7LedgerTest(DistillTestCase):
         self.assertEqual(cand["target_status"], "rescoped-skill-not-found")
         self.assertEqual(cand["recommend"], "accept")
         self.assertIn("skill directory of oneshot-pipeline was not found", distill.render_markdown(pack))
+
+    def test_gh_called_once_per_distinct_remote(self):
+        tree = skills.build(self.home, self.fake_home)
+        second = os.path.join(tree["repo"], "second-skill")
+        self.write(os.path.join(second, "SKILL.md"), "# second\n")
+        os.symlink(second, os.path.join(tree["claude"], "skills", "second-skill"))
+        records = []
+        for skill in ("tracked-skill", "second-skill"):
+            for question in ("Quick mode?", "Fast mode?", "Lean mode?"):
+                records.extend(ask(day, "%s-%s-%d" % (skill, question, day), 10, MODE_LABELS[0],
+                                   option_labels=MODE_LABELS, header="Mode", question=question, skill=skill)
+                               for day in (0, 8, 16))
+        self.add(records)
+        log = os.path.join(self.home, "gh-calls")
+        fake_gh = os.path.join(REPO_ROOT, "tests", "fixtures", "fake-gh")
+        with mock.patch.dict(os.environ, {"APPRENTICE_GH_BIN": fake_gh, "FAKE_GH_MODE": "private",
+                                          "FAKE_GH_LOG": log}):
+            pack, _ = self.build(include_all=True)
+        skilled = [cand for cand in listed(pack) if cand["skill"] in ("tracked-skill", "second-skill")]
+        self.assertGreaterEqual(len(skilled), 4)
+        self.assertTrue(all(cand["target_git"]["visibility"] == "private" for cand in skilled))
+        with open(log, "r", encoding="utf-8") as fh:
+            calls = fh.read().splitlines()
+        self.assertEqual(calls, ["repo view acme/skills --json visibility"])
 
     def test_remaining_counts_follow_scope_and_repo_filters(self):
         self.add(group("yaks zebras quokkas", (0, 8, 16), "w", profile=ALICE))
