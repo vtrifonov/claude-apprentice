@@ -2,6 +2,31 @@
 
 A Claude Code plugin that learns how you work. It quietly collects your decisions, corrections and tone of voice during sessions. On demand it suggests CLAUDE.md and skill improvements, so Claude can work more autonomously. It only proposes: nothing is written to a rules file until you accept it.
 
+## The idea
+
+Every time Claude asks you something, and every time you correct it, you teach it something. Then the session ends and the lesson is gone. Next week you answer the same question the same way, and type the same correction again.
+
+claude-apprentice keeps those lessons. It records the small, repeated signals:
+
+- the answers you give to `AskUserQuestion` pickers;
+- whether you take the "(Recommended)" option;
+- the prompts where you push back on what Claude just did;
+- how you write.
+
+When you ask, it turns the patterns into concrete rule proposals. You review them one at a time. Accepted rules go into the right file:
+
+- your global CLAUDE.md;
+- a repo's personal `CLAUDE.local.md`;
+- the `SKILL.md` of the skill that keeps asking.
+
+Typical outcomes:
+
+- **A skill stops asking a question you always answer the same way.** Example: *Default to quick mode without asking; ask only when auth, persistence or deploy is in play.*
+- **A correction becomes a standing rule.** Example: *Never run e2e tests unless asked; the unit suite is the gate.*
+- **A tone file teaches Claude how you write.** Drafts in your voice sound like you, and replies to you match how you read.
+
+## How it works
+
 ```mermaid
 flowchart LR
     capture["capture<br/>hooks write events"] --> distill["distill<br/>cluster into a review pack"]
@@ -9,19 +34,71 @@ flowchart LR
     review --> apply["apply<br/>write the rule, keep a ledger"]
 ```
 
-## Install
+1. **Capture (always on, silent).** Plugin hooks on `SessionStart`, `UserPromptSubmit`, `PreToolUse` and `PostToolUse` append small JSON events to `~/.claude/apprentice/events/`. They capture:
+   - each AskUserQuestion with its options and your answer, including Other text and rejected pickers;
+   - each prompt you type, with the last few hundred characters of Claude's reply before it, so a correction keeps its context.
 
-From a checkout. The marketplace is named `vtrifonov` and the plugin `apprentice`, so the install key is `apprentice@vtrifonov`.
+   Text is scrubbed of secrets before it is written. The capture hooks run async, add about 12 ms, and never fail or block a session. `/apprentice:backfill` reads your past transcripts once, so you start with history instead of an empty log.
+2. **Distill (on demand, local).** `/apprentice:suggest` runs a stdlib-only Python pass over the events and builds a review pack:
+   - Questions are clustered by their normalized wording. For each cluster it measures how consistently you answer and whether you follow the recommendation.
+   - When your answer depends on something, a decision split finds the condition, such as the repo, the weekday or a file count, and the rule is worded conditionally.
+   - Prompts that push back on Claude's previous turn are grouped by topic into correction candidates.
+   - Each candidate gets a confidence band (high, medium or low) from its sample size and from how many separate sessions and days back it up.
+   - Each candidate also gets a proposed target file.
+3. **Review (you decide).** The `apprentice:distill` skill words each candidate as a short rule in the style of your CLAUDE.md. It shows the evidence and asks one picker: Accept, Decline, Later, or Edit or rescope.
+   - Declined and snoozed candidates stay hidden until enough new evidence arrives, at least three new events.
+   - Every decision is logged in a ledger.
+4. **Apply (safe writes).** Accepted rules go into a marked `<!-- apprentice:start -->` / `<!-- apprentice:end -->` section, one line per rule, each tagged with a stable id.
+   - A backup is taken before every edit.
+   - A file tracked in git is written only after you see the diff and confirm it; nothing is ever committed.
+   - `--undo <id>` removes a rule, and `--replay` restores rules after a file was reset.
+   - Repo rules go to the main checkout's `CLAUDE.local.md`. That file is added to `.git/info/exclude` and symlinked into worktrees.
+
+Two optional extras:
+
+- **`/apprentice:tone`** measures how you write: message length, registers, openers, punctuation, recurring spelling patterns, and an estimated proficiency band. It writes a tone file with real examples. A one-line pointer in your global CLAUDE.md tells Claude to use it when drafting as you or answering you.
+- **`/apprentice:preclassify`** sends correction pairs to haiku, so similar corrections group better. It runs with `--safe-mode`, no tools and no saved session.
+
+## Requirements
+
+- Claude Code with plugin support.
+- macOS or Linux with Python 3.9 or newer at `/usr/bin/python3`, or at `APPRENTICE_PYTHON`. Standard library only, with nothing to `pip install`. On macOS, install the Command Line Tools (`xcode-select --install`).
+
+## Quick start
+
+The repository is private for now, so you need read access to it.
 
 ```
-claude plugin marketplace add <path-to-checkout>
+claude plugin marketplace add vtrifonov/claude-apprentice
 claude plugin install apprentice@vtrifonov
 ```
 
-During development, add the marketplace from the worktree instead. The plugin then runs from that path, so only commit there when the test suite is green.
+Or from a local clone:
 
 ```
-claude plugin marketplace add <path-to-worktree>
+git clone https://github.com/vtrifonov/claude-apprentice.git
+claude plugin marketplace add ./claude-apprentice
+claude plugin install apprentice@vtrifonov
+```
+
+Then, in a new session:
+
+1. `/apprentice:status` checks that capture works and lists any profile still missing the plugin.
+2. `/apprentice:backfill` imports your past transcripts in the background. Check its progress in `/apprentice:status`.
+3. If you use several Claude Code profiles (`CLAUDE_CONFIG_DIR`), decide which ones may see each other's text, and set `account_groups` and `unknown_group` in `~/.claude/apprentice/config.json`. See [Configuration](#configuration). Without `unknown_group`, backfilled text is withheld and packs show counts only.
+4. `/apprentice:suggest` reviews the first candidates.
+5. Optionally, run `/apprentice:tone` once you have a few hundred prompts.
+
+Use it for a week or two, then run `/apprentice:suggest` again. The useful patterns are the ones that repeat.
+
+## Install details
+
+The marketplace is named `vtrifonov` and the plugin `apprentice`, so the install key is `apprentice@vtrifonov`.
+
+During development, add the marketplace from a local checkout or worktree. The plugin then runs from that path, so only commit there when the test suite is green.
+
+```
+claude plugin marketplace add <path-to-checkout>
 ```
 
 ### Every profile
@@ -100,7 +177,7 @@ Hooks and scripts run `${APPRENTICE_PYTHON:-/usr/bin/python3}` with `-I -S`. The
 
 On macOS, `/usr/bin/python3` is a stub until the Command Line Tools are installed. Without them the hooks silently stop, and `/apprentice:status` reports "interpreter missing". Fix it with `xcode-select --install`, or point `APPRENTICE_PYTHON` at a Python 3.9+ interpreter.
 
-Cost, measured under load (quiet-machine C2 pending): post-tool hook median 56.2 ms against a 44.2 ms bare-interpreter baseline, user-prompt 56.5 ms against 44.7 ms, so about 12 ms per hook on top of Python start-up. Both hooks run async and never block a prompt.
+Cost, measured during a test run on a busy machine: post-tool hook median 56.2 ms against a 44.2 ms bare-interpreter baseline, user-prompt 56.5 ms against 44.7 ms, so about 12 ms per hook on top of Python start-up. Both hooks run async and never block a prompt.
 
 ## Configuration
 
@@ -131,7 +208,7 @@ Real group, profile and employer names never go into a committed file. Keep conf
 
 ## Tone file
 
-`/apprentice:tone` writes `profile/tone-<group>.md` for the current account group only. A session reaches it through its SessionStart line, which names the file for that session's own group and no other. The tone pointer rule in the global CLAUDE.md tells Claude to read that file only when the line is present. SessionStart stdout reaches the session (seen live in the CLI); the worktree CLAUDE.local.md half of V7 is pending (C5). Where the line does not arrive, mention the file by hand.
+`/apprentice:tone` writes `profile/tone-<group>.md` for the current account group only. A session reaches it through its SessionStart line, which names the file for that session's own group and no other. The tone pointer rule in the global CLAUDE.md tells Claude to read that file only when the line is present. SessionStart output reaches the session in the CLI. Where the line does not arrive, mention the file by hand.
 
 The command installs the pointer with `tone.py --install-pointer`. It first runs `--install-pointer --dry-run` and shows the diff. When the global CLAUDE.md is inside a git work tree, the picker offers `Install into the tracked file` (recommended only for a private remote) and then installs with `--confirm-tracked`. A missing global CLAUDE.md is created (mode 0600) with the apprentice section. A display name typed into the picker's Other field is stored only while none is set, through a file (`--display-name-file`), never as a command-line argument; with a name already set, Other text is answered as a reply and nothing is installed. Installing twice gives `result=unchanged`.
 
