@@ -161,6 +161,30 @@ def branch(d: str) -> Optional[str]:
     return None
 
 
+IS_TRACKED_TIMEOUT = 5.0
+
+
+def is_tracked(main: str, relpath: str) -> Optional[bool]:
+    """Whether relpath is tracked in the checkout at main; None when git cannot answer. Hooks never call it."""
+    import subprocess  # lazy: the hook path imports this module and never runs git
+
+    env = dict(os.environ)
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    # `git` comes from PATH on purpose: the interpreter is pinned, but /usr/bin/git is a Command Line
+    # Tools stub that can trigger the install prompt.
+    try:
+        result = subprocess.run(["git", "-C", main, "ls-files", "--error-unmatch", "--", relpath],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                timeout=IS_TRACKED_TIMEOUT, env=env)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    return None
+
+
 def repo_context(cwd: str) -> dict:
     root = find_git(cwd)
     if root is None:

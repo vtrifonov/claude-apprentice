@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+"""Stand-in for gh: FAKE_GH_MODE=public|private|sleep|missing-json answers `repo view --json visibility`."""
+import os
+import sys
+import time
+
+mode = os.environ.get("FAKE_GH_MODE", "")
+if mode in ("public", "private"):
+    sys.stdout.write('{"visibility": "%s"}\n' % mode.upper())
+    sys.exit(0)
+if mode == "sleep":
+    time.sleep(10)
+    sys.exit(0)
+if mode == "missing-json":
+    sys.stdout.write("{}\n")
+    sys.exit(0)
+sys.exit(1)

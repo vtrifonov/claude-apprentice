@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""Stand-in for git: FAKE_GIT_MODE=sleep hangs for 10 s, exit128 fails like a broken repo."""
+import os
+import sys
+import time
+
+mode = os.environ.get("FAKE_GIT_MODE", "")
+if mode == "sleep":
+    time.sleep(10)
+    sys.exit(0)
+if mode == "exit128":
+    sys.exit(128)
+sys.exit(1)
