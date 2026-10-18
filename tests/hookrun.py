@@ -2,7 +2,7 @@ import json
 import os
 import subprocess
 
-from tests.base import REPO_ROOT
+from tests.base import REPO_ROOT, isolated_env
 
 _FIXTURES = os.path.join(REPO_ROOT, "tests", "fixtures")
 _EVENT_KEYS = {
@@ -40,17 +40,24 @@ def baseline_command(event):
     return command.replace(script, "-c pass")
 
 
+def hook_env(env_extra, root=None, home=None, fake_home=None):
+    """The environment a hook subprocess runs with: scratch APPRENTICE_HOME and HOME unless overridden."""
+    base = isolated_env()
+    env = {"PATH": "/usr/bin:/bin"}
+    env["CLAUDE_PLUGIN_ROOT"] = root or REPO_ROOT
+    env["APPRENTICE_HOME"] = home if home is not None else base["APPRENTICE_HOME"]
+    env["HOME"] = fake_home if fake_home is not None else base["HOME"]
+    env.update(env_extra)
+    return env
+
+
 def run_hook(event, stdin, env_extra, root=None, home=None, fake_home=None, command=None):
     """Run the hooks.json command for `event` through sh; return (code, stdout, stderr).
 
     root defaults to the repo, home and fake_home to the current APPRENTICE_HOME and HOME;
     command overrides the hooks.json command string.
     """
-    env = {"PATH": "/usr/bin:/bin"}
-    env["CLAUDE_PLUGIN_ROOT"] = root or REPO_ROOT
-    env["APPRENTICE_HOME"] = home if home is not None else os.environ["APPRENTICE_HOME"]
-    env["HOME"] = fake_home if fake_home is not None else os.environ["HOME"]
-    env.update(env_extra)
+    env = hook_env(env_extra, root, home, fake_home)
     result = subprocess.run(["sh", "-c", command or hook_command(event)], input=stdin, env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return result.returncode, result.stdout, result.stderr

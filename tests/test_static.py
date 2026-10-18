@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import unittest
 
-from tests.base import REPO_ROOT
+from tests.base import REPO_ROOT, isolated_env
 from tests.stdlib_modules import STDLIB
 
 _CODE_DIRS = ("apprentice", "hooks", "scripts")
@@ -159,7 +159,8 @@ class StaticGateTest(unittest.TestCase):
                 continue
             path = os.path.join(scripts_dir, name)
             cmd = '"${APPRENTICE_PYTHON:-/usr/bin/python3}" -I -S "%s" --help' % path
-            result = subprocess.run(["sh", "-c", cmd], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            result = subprocess.run(["sh", "-c", cmd], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    env=isolated_env())
             self.assertEqual(result.returncode, 0, name)
 
     def test_commands_reference_existing_skills(self):

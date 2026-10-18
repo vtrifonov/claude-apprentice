@@ -19,6 +19,8 @@ _COMMAND_RE = re.compile(r"^/[\w:.-]+$")
 _IMAGE_ONLY_RE = re.compile(r"^\[Image #\d+\]\W*$")
 _PASTE_LINE_RE = re.compile(r"(?:>|```|[ \t]+at |[ \t]*File \"|Traceback)")
 _PASTE_LINES = 3
+_PASTED_MARKER = "<pasted_content id="
+_PASTED_TAG_RE = re.compile(r"</?pasted_content\b[^>]*>")
 _ACK_RE = re.compile(r"^(continue|go on|resume|retry|go|yep|yes|ok|sure|post|approve)\W*$",
                      re.IGNORECASE)
 
@@ -53,14 +55,16 @@ def _paste_lines(text: str) -> int:
     return sum(1 for line in text.splitlines() if _PASTE_LINE_RE.match(line))
 
 
-def _result(outcome: str, text: str, stored: Optional[str], **extra) -> Dict:
+def _result(outcome: str, text: str, stored: Optional[str], clean: Optional[str] = None, **extra) -> Dict:
+    """`sha1` hashes the raw `text`; `len` and `words` count `clean` when it differs."""
+    counted = text if clean is None else clean
     result = {
         "outcome": outcome,
         "command": None,
         "text": stored,
         "sha1": _sha1(text),
-        "len": len(text),
-        "words": len(text.split()),
+        "len": len(counted),
+        "words": len(counted.split()),
         "tags": [],
         "register": None,
         "strong_marker": False,
@@ -111,13 +115,18 @@ def classify(text: str) -> Dict:
     stripped = text.lstrip()
     if _IMAGE_ONLY_RE.match(stripped):
         return _result("prompt", text, None, tags=["image_only"], image_only=True)
-    pasted = len(text) > LONG_TEXT or _paste_lines(text) >= _PASTE_LINES
+    raw = text
+    wrapped = _PASTED_MARKER in text
+    if wrapped:
+        text = _PASTED_TAG_RE.sub("", text).strip()
+        stripped = text
+    pasted = wrapped or len(text) > LONG_TEXT or _paste_lines(text) >= _PASTE_LINES
     if not pasted and _ACK_RE.match(stripped):
         return _result("prompt", text, text[:TEXT_CAP], register="ack")
     tags = _tags(stripped[:80].lower())
     if pasted:
         tags = sorted(tags + ["pasted"])
     return _result(
-        "prompt", text, text[:PASTED_CAP] if pasted else text[:TEXT_CAP],
+        "prompt", raw, text[:PASTED_CAP] if pasted else text[:TEXT_CAP], clean=text,
         tags=tags, register=_register(tags, text), pasted=pasted,
         strong_marker=bool(_STRONG_RE.search(text.lower())))

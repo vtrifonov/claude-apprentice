@@ -38,6 +38,7 @@ class StatusTestBase(ApprenticeTestCase):
         else:
             data = {} if enabled is None else {"enabledPlugins": {_PLUGIN_KEY: enabled}}
             self.write(os.path.join(path, "settings.json"), json.dumps(data))
+        os.makedirs(os.path.join(path, "projects"), exist_ok=True)
         if transcript_age is not None:
             transcript = self.write(os.path.join(path, "projects", "slug", "x.jsonl"), "{}\n")
             stamp = self.now - transcript_age
@@ -121,6 +122,23 @@ class EnablementTest(StatusTestBase):
         names = [os.path.basename(p) for p in status.profile_dirs(self.fake_home)]
         self.assertEqual(names, [".claude", ".claude-acme-alice", ".claude-acme-bob"])
 
+    def test_profile_dirs_discovery_rules(self):
+        self.write(os.path.join(self.fake_home, ".claude-mem", "settings.json"), "{}")
+        os.makedirs(os.path.join(self.fake_home, ".claude-monitor"))
+        self.write(os.path.join(self.fake_home, ".claude-x", "settings.json"), "{}")
+        os.makedirs(os.path.join(self.fake_home, ".claude-x", "projects"))
+        self.write(os.path.join(self.fake_home, ".claude-y", "settings.json"), "{}")
+        self.write(os.path.join(self.fake_home, ".claude-y", ".claude.json"), "{}")
+        self.write(os.path.join(self.fake_home, ".claude-z", "settings.json"), "{}")
+        names = [os.path.basename(p) for p in status.profile_dirs(self.fake_home)]
+        self.assertEqual(names, [".claude", ".claude-mem", ".claude-x", ".claude-y"])
+
+    def test_default_profile_hint_unsets_config_dir(self):
+        self.profile_dir(".claude", enabled=False)
+        text = self.report()
+        self.assertIn("  env -u CLAUDE_CONFIG_DIR claude plugin %s %s" % (status.ENABLE_VERB, _PLUGIN_KEY), text)
+        self.assertNotIn("CLAUDE_CONFIG_DIR=%s" % os.path.join(self.fake_home, ".claude"), text)
+
     def test_plugin_enabled(self):
         self.setup_profiles()
         self.profile_dir(".claude-none")
@@ -160,6 +178,7 @@ class EnablementTest(StatusTestBase):
         self.profile_dir(".claude", enabled=True)
         bob = self.profile_dir(".claude-acme-bob", enabled=True)
         shared = os.path.join(self.fake_home, ".claude", "projects")
+        os.rmdir(os.path.join(bob, "projects"))
         os.symlink(shared, os.path.join(bob, "projects"))
         for name, cwd, age in (("home.jsonl", "/home/alice/personal/x", 0),
                                ("work.jsonl", "/home/alice/work/acme", 48 * _HOUR)):
@@ -168,7 +187,10 @@ class EnablementTest(StatusTestBase):
             os.utime(path, (self.now - age, self.now - age))
         self.event(profile="default", ts=_iso(self.now))
         self.event(profile=".claude-acme-bob", ts=_iso(self.now - 47 * _HOUR))
-        self.assertIn("STALE", " ".join(self.row(self.report(), ".claude-acme-bob")))
+        text = self.report()
+        self.assertNotIn("STALE", text)
+        self.assertIn("transcripts are shared across 2 profiles; set profile_rules in config.json "
+                      "to attribute them per profile", text)
         self.write(os.path.join(self.home, "config.json"), json.dumps({"profile_rules": [
             {"cwd_prefix": "/home/alice/work", "profile": ".claude-acme-bob"},
             {"cwd_prefix": "/home/alice/personal", "profile": "default"}]}))
@@ -177,6 +199,24 @@ class EnablementTest(StatusTestBase):
         self.assertNotIn("STALE", " ".join(bob_row))
         self.assertIn(_iso(self.now - 48 * _HOUR)[:19] + "Z", bob_row)
         self.assertIn(_iso(self.now)[:19] + "Z", self.row(text, "default"))
+        self.assertNotIn("transcripts are shared", text)
+
+    def test_shared_projects_with_rules_keep_stale_for_idle_profile(self):
+        self.profile_dir(".claude", enabled=True)
+        bob = self.profile_dir(".claude-acme-bob", enabled=True)
+        shared = os.path.join(self.fake_home, ".claude", "projects")
+        os.rmdir(os.path.join(bob, "projects"))
+        os.symlink(shared, os.path.join(bob, "projects"))
+        path = self.write(os.path.join(shared, "slug", "work.jsonl"),
+                          json.dumps({"type": "user", "cwd": "/home/alice/work/acme",
+                                      "message": {"content": "hi"}}) + "\n")
+        os.utime(path, (self.now - _HOUR, self.now - _HOUR))
+        self.event(profile=".claude-acme-bob", ts=_iso(self.now - 100 * _HOUR))
+        self.write(os.path.join(self.home, "config.json"), json.dumps({"profile_rules": [
+            {"cwd_prefix": "/home/alice/work", "profile": ".claude-acme-bob"}]}))
+        text = self.report()
+        self.assertIn("STALE", " ".join(self.row(text, ".claude-acme-bob")))
+        self.assertNotIn("transcripts are shared", text)
 
     def test_interpreter_missing_first_and_replaces_stale(self):
         self.profile_dir(".claude", enabled=True, transcript_age=0)

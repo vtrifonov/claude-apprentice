@@ -44,6 +44,22 @@ class FiltersTest(ApprenticeTestCase):
         self.assertIn("pasted", result["tags"])
         self.assertFalse(filters.classify("a" * 1500)["pasted"])
 
+    def test_rule5_pasted_content_wrapper(self):
+        body = "alice asked bob about acme/widgets"
+        raw = '\n\n<pasted_content id="3fa9c1d2">\n%s\n</pasted_content id="3fa9c1d2">' % body
+        result = filters.classify(raw)
+        self.assertEqual(result["outcome"], "prompt")
+        self.assertTrue(result["pasted"])
+        self.assertIn("pasted", result["tags"])
+        self.assertEqual(result["text"], body)
+        self.assertEqual(result["len"], len(body))
+        self.assertEqual(result["words"], len(body.split()))
+        self.assertEqual(result["sha1"], hashlib.sha1(raw.encode("utf-8")).hexdigest())
+        lead = filters.classify("please check this" + raw)
+        self.assertTrue(lead["pasted"])
+        self.assertEqual(lead["text"], "please check this\n\n\n%s" % body)
+        self.assertNotIn("pasted_content", lead["text"])
+
     def test_rule5_three_quote_lines(self):
         self.assertTrue(filters.classify("> a\n> b\n> c\nthoughts")["pasted"])
         self.assertFalse(filters.classify("> a\n> b\nthoughts")["pasted"])

@@ -3,9 +3,20 @@ import shutil
 import tempfile
 import unittest
 
+import tests
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
 _CLEARED = ("CLAUDE_CONFIG_DIR", "APPRENTICE_DISABLE", "APPRENTICE_INTERNAL", "CLAUDE_CODE_ENTRYPOINT")
+
+
+def isolated_env():
+    """The current environment with HOME and APPRENTICE_HOME pointing at scratch directories."""
+    env = dict(os.environ)
+    env["APPRENTICE_HOME"] = os.environ.get("APPRENTICE_HOME") or tests.RUN_HOME
+    if os.path.realpath(os.environ.get("HOME", "")) == tests.REAL_HOME:
+        env["HOME"] = tests.FAKE_HOME
+    return env
 
 
 class ApprenticeTestCase(unittest.TestCase):

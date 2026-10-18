@@ -21,6 +21,7 @@ _INTERPRETER_RE = re.compile(r"^(\S+) \S+ interpreter-missing")
 _SKIPPED_RE = re.compile(r"skipped \(([^)]*)\)")
 _LOCAL_NAME = "CLAUDE.local.md"
 _LINE_CAP = 300
+_MEM_DIR = ".claude-mem"
 
 
 def _read_tail(path: str, nbytes: int = _TAIL_BYTES) -> Optional[str]:
@@ -48,18 +49,19 @@ def _iso(epoch: float) -> str:
 
 
 def profile_dirs(real_home: str) -> List[str]:
-    """`~/.claude` plus every `~/.claude-*` directory that holds a settings.json."""
+    """`~/.claude` (always), `~/.claude-mem`, and every `~/.claude-*` directory that holds a settings.json
+    and either a projects/ directory or a .claude.json."""
     try:
         names = sorted(os.listdir(real_home))
     except OSError:
         return []
-    out = []
+    out = [os.path.join(real_home, ".claude")]
     for name in names:
-        if name != ".claude" and not name.startswith(".claude-"):
-            continue
         path = os.path.join(real_home, name)
-        if os.path.isfile(os.path.join(path, "settings.json")):
-            out.append(path)
+        if name.startswith(".claude-") and os.path.isfile(os.path.join(path, "settings.json")):
+            if name == _MEM_DIR or os.path.isdir(os.path.join(path, "projects")) \
+                    or os.path.isfile(os.path.join(path, ".claude.json")):
+                out.append(path)
     return out
 
 
@@ -107,6 +109,16 @@ def _transcripts(profile_dir: str, seen: set) -> List[tuple]:
 
 def _newest_transcript(profile_dir: str) -> Optional[float]:
     return max((mtime for _path, mtime in _transcripts(profile_dir, set())), default=None)
+
+
+def _shared_projects(dirs: List[str]) -> set:
+    """Profile dirs whose projects/ resolves to the same real directory as another listed profile's."""
+    by_real = {}  # type: Dict[str, List[str]]
+    for profile_dir in dirs:
+        root = os.path.realpath(os.path.join(profile_dir, "projects"))
+        if os.path.isdir(root):
+            by_real.setdefault(root, []).append(profile_dir)
+    return set(p for group in by_real.values() if len(group) > 1 for p in group)
 
 
 def _newest_transcript_by_rule(dirs: List[str], cfg: dict) -> Dict[str, float]:
@@ -302,6 +314,7 @@ def _enablement_lines(home_dir_for_profiles: str, cfg: dict, tally: _Tally, miss
     commands = []
     dirs = profile_dirs(home_dir_for_profiles)
     by_rule = _newest_transcript_by_rule(dirs, cfg) if cfg.get("profile_rules") else None
+    shared = _shared_projects(dirs) if by_rule is None else set()
     for path in dirs:
         name = _profile_name(path)
         enabled = plugin_enabled(os.path.join(path, "settings.json"))
@@ -311,15 +324,22 @@ def _enablement_lines(home_dir_for_profiles: str, cfg: dict, tally: _Tally, miss
         if enabled is False:
             flags.append("NOT ENABLED")
         elif transcript is not None and (live is None or transcript - live > STALE_SECONDS):
-            flags.append("INTERPRETER MISSING" if missing else "STALE")
+            if missing:
+                flags.append("INTERPRETER MISSING")
+            elif path not in shared:
+                flags.append("STALE")
         rows.append([name, {True: "yes", False: "no", None: "unknown"}[enabled],
                      _iso(live) if live is not None else "-",
                      _iso(transcript) if transcript is not None else "-", " ".join(flags)])
         if enabled is not True:
-            commands.append("CLAUDE_CONFIG_DIR=%s claude plugin %s %s" % (path, ENABLE_VERB, PLUGIN_KEY))
+            prefix = "env -u CLAUDE_CONFIG_DIR" if name == "default" else "CLAUDE_CONFIG_DIR=%s" % path
+            commands.append("%s claude plugin %s %s" % (prefix, ENABLE_VERB, PLUGIN_KEY))
     if not rows:
         return ["  no profile directories found"]
     out = _table(["profile", "enabled", "newest live event", "newest transcript", "flag"], rows)
+    if shared:
+        out.append("transcripts are shared across %d profiles; set profile_rules in config.json "
+                   "to attribute them per profile" % len(shared))
     if commands:
         out.append("to enable a profile, run:")
         out.extend("  " + c for c in commands)

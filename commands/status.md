@@ -13,6 +13,6 @@ Show the apprentice status report.
    "${APPRENTICE_PYTHON:-/usr/bin/python3}" -I -S "<root>/scripts/status.py"
    ```
 
-3. Show the report to the user as printed. If a profile row carries `NOT ENABLED`, `STALE` or `INTERPRETER MISSING`, point at the command printed below the table or at the interpreter remedy.
+3. Show the report to the user as printed. If a profile row carries `NOT ENABLED`, `STALE` or `INTERPRETER MISSING`, point at the command printed below the table or at the interpreter remedy. Show the printed command as is: the default profile's command starts with `env -u CLAUDE_CONFIG_DIR`, which is intended. If the report says transcripts are shared across profiles, tell the user to set `profile_rules` in config.json.
 
 4. If the call exits with 126 or 127, or its output mentions `xcrun`, the Python interpreter is missing. Say so and name the README remedy: run `xcode-select --install`, or set `APPRENTICE_PYTHON` to a Python 3.9 or newer interpreter.
