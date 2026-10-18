@@ -186,6 +186,8 @@ class TargetResolver:
         self.labels = labels
         self.tracked_cache = tracked_cache
         self._profile_dirs = None  # type: Optional[List[str]]
+        self._global_git = None  # type: Optional[dict]
+        self._global_git_done = False
 
     def _tracked(self, main: str) -> Optional[bool]:
         if main not in self.tracked_cache:
@@ -216,7 +218,7 @@ class TargetResolver:
             return None
         if is_readonly_skill(directory):
             return {"name": name, "target": self.global_target()["target"],
-                    "target_status": "rescoped-readonly", "target_git": None}
+                    "target_status": "rescoped-readonly", "target_git": self.global_git()}
         target = os.path.join(directory, "SKILL.md")
         info = apply.inspect_target(target, self.cfg)
         git = {key: info[key] for key in _GIT_FIELDS if key in info}
@@ -240,11 +242,22 @@ class TargetResolver:
                 shared.add(group)
         return {"target": target, "target_shared_groups": sorted(shared)}
 
+    def global_git(self) -> Optional[dict]:
+        """`target_git` of the global CLAUDE.md: set only when it sits inside a git work tree (a dotfiles or
+        config repo), so the tracked block, `--confirm-tracked` and `recommend` apply to it; else None."""
+        if not self._global_git_done:
+            target = self.global_target()["target"]
+            info = apply.inspect_target(target, self.cfg)
+            self._global_git = {key: info[key] for key in _GIT_FIELDS if key in info} if info["tracked"] else None
+            self._global_git_done = True
+        return self._global_git
+
     def alt_targets(self, candidate_scope: str, skill_name: Optional[str], repo_cwds: Dict[str, List[str]],
                     repo_visible: Dict[str, bool]) -> dict:
         repos = {repo: self.repo_target(cwds, repo, bool(repo_visible.get(repo)))
                  for repo, cwds in sorted(repo_cwds.items())}
-        return {"global": self.global_target(), "repo": repos, "skill": self.skill_target(skill_name)}
+        return {"global": dict(self.global_target(), target_git=self.global_git()), "repo": repos,
+                "skill": self.skill_target(skill_name)}
 
     @staticmethod
     def recommend(target_status: str, target_git: Optional[dict]) -> str:

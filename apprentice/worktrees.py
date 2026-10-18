@@ -20,16 +20,24 @@ def _read_text(path: str) -> Optional[str]:
         return None
 
 
+def is_exclude_line(line: str) -> bool:
+    """An info/exclude line that ignores the checkout-root CLAUDE.local.md (with or without the leading slash)."""
+    return line.strip() in (LOCAL_NAME, "/" + LOCAL_NAME)
+
+
 def _excluded(root: str) -> bool:
     path = gitinfo.exclude_path(root)
     text = _read_text(path) if path else None
     if text is None:
         return False
-    return any(line.strip() == LOCAL_NAME for line in text.splitlines())
+    return any(is_exclude_line(line) for line in text.splitlines())
 
 
 def ensure_exclude_line(main: str) -> str:
-    """Make git ignore CLAUDE.local.md in the checkout at `main`: "added", "present" or "failed"."""
+    """Make git ignore CLAUDE.local.md in the checkout at `main`: "added", "present" or "failed".
+
+    Apply calls it under its apply lock, so two applies never both append the line.
+    """
     path = gitinfo.exclude_path(main)
     if path is None:
         return "failed"
@@ -39,7 +47,7 @@ def ensure_exclude_line(main: str) -> str:
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8", errors="surrogateescape") as fh:
                 existing = fh.read()
-        if any(line.strip() == LOCAL_NAME for line in existing.splitlines()):
+        if any(is_exclude_line(line) for line in existing.splitlines()):
             return "present"
         prefix = "" if not existing or existing.endswith("\n") else "\n"
         with open(path, "a", encoding="utf-8", errors="surrogateescape") as fh:

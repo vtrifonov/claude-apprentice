@@ -352,6 +352,44 @@ class PackTest(DistillTestCase):
         self.assertEqual(inherited[0]["inherited_from"], cluster.ask_rule_id(new_key))
         self.assertEqual(inherited[0]["stem"], new_key[2])
 
+    def test_merged_rewording_counts_toward_unhide(self):
+        cfg = config.load_config(self.home)
+        aliases = config.effective_tables(cfg)["header_aliases"]
+        old_q = "Use fable model for the release build?"
+        new_q = "Use fable model for the nightly release build?"
+        fable = MODEL_LABELS[0]
+        self.add([ask(day, "o-%d" % day, 10, fable, question=old_q) for day in (0, 8, 16)])
+        self.add([ask(day, "n-%d" % day, 10, fable, question=new_q) for day in (24, 32, 40)])
+        old_key = cluster.cluster_key(None, "Models", old_q, MODEL_LABELS, aliases)
+        old_id = cluster.ask_rule_id(old_key)
+        ledger.append_proposal(self.home, {"id": old_id, "status": "rejected", "n_at_decision": 3,
+                                           "decided_at": ts(20), "kind": "ask",
+                                           "cluster_key": cluster.key_string(old_key)})
+        # the rewording's three events come after the decision: merged into the decided record they unhide it
+        pack, private = self.build(include_all=True)
+        self.assertEqual([cand["id"] for cand in listed(pack)], [old_id])
+        self.assertEqual(pack["remaining"]["hidden_by_ledger"], 0)
+        self.assertEqual(private[old_id]["n"], 6)
+        cand = listed(pack)[0]
+        self.assertEqual(cand["band_inputs"]["n"], 6)
+        self.assertEqual(cand["band_inputs"]["sessions"], 6)
+
+    def test_global_target_in_work_tree_has_target_git(self):
+        repo = os.path.join(self.fake_home, "dotfiles")
+        self.write(os.path.join(repo, ".git", "HEAD"), "ref: refs/heads/main\n")
+        real = self.write(os.path.join(repo, "CLAUDE.md"), "# mine\n")
+        os.makedirs(os.path.join(self.fake_home, ".claude"), exist_ok=True)
+        os.symlink(real, os.path.join(self.fake_home, ".claude", "CLAUDE.md"))
+        self.add(group("apples bananas cherries", (0, 8, 16), "gt"))
+        pack, _ = self.build()
+        cand = self.by_summary(pack, "apples")
+        self.assertEqual(cand["scope"], "global")
+        self.assertIs(cand["target_git"]["tracked"], True)
+        self.assertEqual(cand["target_git"]["root"], repo)
+        self.assertEqual(cand["recommend"], "rescope-global")
+        self.assertEqual(cand["alt_targets"]["global"]["target_git"]["root"], repo)
+        self.assertIn("- Tracking: tracked in git (no remote, unknown)", distill.render_markdown(pack).splitlines())
+
     def test_concurrent_reworded_question_keeps_own_id(self):
         cfg = config.load_config(self.home)
         aliases = config.effective_tables(cfg)["header_aliases"]

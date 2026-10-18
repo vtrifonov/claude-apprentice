@@ -135,6 +135,18 @@ class GlobalApplyTest(ApplyCliCase):
         self.assertEqual(self.run_script("--id", A).returncode, 2)
         self.assertEqual(self.run_script("--scope", "nowhere").returncode, 2)
 
+    def test_global_in_work_tree_needs_confirm_and_applies(self):
+        self.write(os.path.join(self.fake_home, ".claude", ".git", "HEAD"), "ref: refs/heads/main\n")
+        self.write_pack([{"id": A, "kind": "correction", "topic": "t", "evidence_ids": [], "repos": []}], {})
+        refused = self.applied_global(A, "--pack", self.pack)
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("result=skipped:git-tracked", self.out(refused))
+        self.assertEqual(self.read(self.claude_md), "# Mine\n")
+        written = self.applied_global(A, "--pack", self.pack, "--confirm-tracked")
+        self.assertEqual(written.returncode, 0, written.stderr)
+        self.assertIn(TEXT, self.read(self.claude_md))
+        self.assertIs(ledger.read_applied(self.home)[-1]["tracked"], True)
+
     def test_removed_flags(self):
         for flag in ("--include-unknown", "--all-profiles"):
             result = self.run_script(flag)
@@ -357,7 +369,8 @@ class SkillTargetTest(ApplyCliCase):
         self.write_pack([{"id": A, "kind": "ask", "topic": "t", "evidence_ids": [], "repos": []}], {})
         result = self.skill_apply(target, "--pack", self.pack, "--confirm-tracked")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("result=skipped:repo-claude-md", self.out(result))
+        # a skill-scope target must be a SKILL.md, so a repo CLAUDE.md is refused before the repo-claude-md check
+        self.assertIn("result=skipped:bad-target", self.out(result))
         self.assertEqual(self.read(target), "# Repo\n")
 
 

@@ -137,6 +137,27 @@ class LedgerE2ETest(ApprenticeTestCase):
             self.assertEqual(self.names(second, rule_id), [])
         self.assertGreaterEqual(second["remaining"]["hidden_by_ledger"], 1)
 
+    def backdate(self, rule_id, decided_at):
+        """Re-record the last decision as made at `decided_at`, before the fixture events that follow it."""
+        entry = dict(self.last_entry(rule_id), decided_at=decided_at)
+        ledger.append_proposal(self.home, entry)
+
+    def test_declined_group_resurfaces_after_enough_new_evidence(self):
+        g_ids = self.group(G_BASE, 3, 0, "g")
+        first, _, path = self.distill()
+        group = self.find(first, g_ids)
+        self.record("--id", group["id"], "--status", "rejected", "--n-at-decision", "3", "--pack", path)
+        self.backdate(group["id"], ts(15))
+        hidden, _, _ = self.distill()
+        self.assertEqual(self.names(hidden, group["id"]), [])
+        self.assertEqual(hidden["remaining"]["hidden_by_ledger"], 1)
+        new_ids = self.reword(G_BASE, 20) + self.reword(G_BASE, 30)
+        second, _, _ = self.distill()
+        listed = [cand for cand in second["candidates"] + second["weak"] if cand["id"] == group["id"]]
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(second["remaining"]["hidden_by_ledger"], 0)
+        self.assertTrue(set(new_ids) <= set(listed[0]["evidence_ids"]))
+
     def test_merged_then_declined_hidden_under_alias(self):
         a_ids, b_ids, a, b, path = self.two_groups()
         self.record("--id", a, "--status", "rejected", "--merged-ids", b, "--n-at-decision", "4", "--pack", path)

@@ -62,7 +62,7 @@ class ExcludeLineTest(RepoCase):
         out = self.apply_repo()
         self.assertEqual(out["result"], "skipped:exclude-failed")
         self.assertFalse(os.path.lexists(self.local()))
-        self.assertEqual(ledger.read_applied(self.home), [])
+        self.assertEqual([r["result"] for r in ledger.read_applied(self.home)], ["skipped:exclude-failed"])
 
     def test_ensure_exclude_line_added_present_failed_and_info_created(self):
         main = self.tree["main"]
@@ -155,7 +155,7 @@ class GuardTest(RepoCase):
             self.assertEqual(out["result"], "skipped:git-tracked-local")
             self.assertIn("global", out["message"])
             self.assertEqual(snapshot(), before)
-        self.assertEqual(ledger.read_applied(self.home), [])
+        self.assertEqual([r["result"] for r in ledger.read_applied(self.home)], ["skipped:git-tracked-local"] * 2)
         self.assertEqual(ledger.read_proposals(self.home), [])
 
     def test_fake_git_failure_gives_index_unknown(self):

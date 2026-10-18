@@ -116,7 +116,8 @@ def main(argv) -> int:
     home_dir = config.home()
     cfg = config.load_config(home_dir)
     if args.undo:
-        return _report([dict(apply.undo(args.undo, home_dir, cfg, dry_run=args.dry_run), id=args.undo)])
+        out = apply.undo(args.undo, home_dir, cfg, dry_run=args.dry_run)
+        return _report([dict(entry, id=args.undo) for entry in out.get("results") or [out]])
     if args.replay:
         return _report(apply.replay(home_dir, cfg, args.confirm_tracked, args.dry_run))
     return _apply(args, home_dir, cfg)

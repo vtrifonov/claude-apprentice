@@ -300,7 +300,8 @@ class _Run(object):
             info = resolver.skill_target(skill_name)
             if info is None:
                 # like a read-only skill: the rule goes to the global file with the skill named in its lead
-                out.update(target=resolver.global_target()["target"], target_status=RESCOPED_MISSING)
+                out.update(target=resolver.global_target()["target"], target_status=RESCOPED_MISSING,
+                           target_git=resolver.global_git())
             else:
                 out.update(target=info["target"], target_status=info["target_status"], target_git=info["target_git"])
         elif scope_name == "repo":
@@ -316,7 +317,8 @@ class _Run(object):
                 out["target_status"] = "no-checkout"
         else:
             info = resolver.global_target()
-            out.update(target=info["target"], target_shared_groups=info["target_shared_groups"])
+            out.update(target=info["target"], target_shared_groups=info["target_shared_groups"],
+                       target_git=resolver.global_git())
         out["repos"] = repos
         out["recommend"] = resolver.recommend(out["target_status"], out["target_git"])
         out["alt_targets"] = resolver.alt_targets(scope_name, skill_name, repo_cwds,
@@ -406,6 +408,20 @@ def _merge_into(winner: list, loser: list) -> None:
     if private.get("tokens") is not None and other_private.get("tokens") is not None:
         private["tokens"] = list(private["tokens"]) + list(other_private["tokens"])
     items.extend(other_items)
+    _refresh_band(record, other_record, private["n"], items)
+
+
+def _refresh_band(record: dict, other_record: dict, n: int, items: List[_Item]) -> None:
+    """Band and confidence from the merged evidence; a sequential rewording's sessions do not overlap the winner's."""
+    inputs = dict(record.get("band_inputs") or {})
+    other = other_record.get("band_inputs") or {}
+    sessions = (inputs.get("sessions") or 0) + (other.get("sessions") or 0)
+    repos = max(inputs.get("repos") or 0, other.get("repos") or 0, len({item.repo for item in items if item.repo}))
+    value, fresh = confidence.band(n, sessions, repos, inputs.get("consistency", 1.0), bool(inputs.get("reversal_30d")),
+                                   bool(inputs.get("has_reversal")), inputs.get("path"), inputs.get("split_purity"),
+                                   inputs.get("majority_band"))
+    inputs.update(fresh)
+    record["band"], record["band_inputs"] = value, inputs
 
 
 def _dedupe_ids(outcomes: List[list], run: "_Run") -> List[list]:
@@ -439,6 +455,10 @@ def _dedupe_ids(outcomes: List[list], run: "_Run") -> List[list]:
             record = entry[0]
             record["id"], record["inherited_from"] = record["inherited_from"], None
             entry[3] = "proposable"
+        if len(taken) > 1:
+            # the merged items count toward the unhide threshold: recompute the ledger outcome from all of them
+            winner = sharing[0]
+            winner[3] = run.ledger_outcome(winner[0], winner[1], winner[4])
     return [entry for entry in outcomes if not any(entry is gone for gone in merged)]
 
 
@@ -779,7 +799,7 @@ def _block(index: int, cand: dict) -> List[str]:
     git = cand.get("target_git") or {}
     if cand.get("scope") == "skill" and git.get("public_mirror"):
         lines.append("- Tracking: public mirror (the skill is listed in public_skills, so the rule would be public)")
-    elif cand.get("scope") == "skill" and git.get("tracked"):
+    elif cand.get("scope") in ("skill", "global") and git.get("tracked"):
         lines.append("- Tracking: tracked in git (%s, %s)" % (git.get("remote") or "no remote",
                                                              git.get("visibility") or "visibility unknown"))
     lines.append("- Band: %s · n %s · %s sessions · %s repos%s · %s to %s" % (
