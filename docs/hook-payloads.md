@@ -92,4 +92,63 @@ An image-only prompt has `text: null` and the `image_only` tag.
 
 ## Entrypoint
 
-`CLAUDE_CODE_ENTRYPOINT` is `cli` on every live interactive event.
+`CLAUDE_CODE_ENTRYPOINT` is `cli` on every live interactive event. A payload `entrypoint` field wins when
+present; otherwise the environment variable, then the transcript head, decide. With none of them the event
+carries the `entrypoint_unknown` flag and is captured. Only entrypoints in `capture_entrypoints` (default `cli`,
+`claude-desktop`) are captured.
+
+## Fields read per hook event
+
+Only these fields are read. Everything else in the payload is ignored.
+
+| Event | Fields read |
+|---|---|
+| PreToolUse (`AskUserQuestion`) | `session_id`, `cwd`, `transcript_path`, `entrypoint`, `tool_use_id`, `tool_input` (`questions`) |
+| PostToolUse (`AskUserQuestion`) | the same, plus `tool_response` |
+| UserPromptSubmit | `session_id`, `cwd`, `transcript_path`, `entrypoint`, `prompt` |
+| SessionStart | `session_id`, `cwd`, `transcript_path`, `entrypoint` |
+
+PreToolUse writes a pending marker under `state/pending-ask/`. PostToolUse pairs the answer with it. A rejected
+picker leaves a marker and no answer.
+
+## `tool_response` shapes
+
+The examples above cover every shape seen live:
+
+| Shape | Marker |
+|---|---|
+| Structured, `answers` a map | one string per question text |
+| Structured, `answers` a list | items with `question` and `answer` (accepted, not seen live) |
+| Text, answered | starts with `Your questions have been answered:` or `The user answered:` |
+| Text, rejected | `is_error: true`, starts with `The user doesn't want to proceed with` |
+
+## Prompt serialization (V11)
+
+The hook `prompt` carries the `<pasted_content id=...>` wrapper verbatim, so the capture strips it itself and
+keeps `sha1` on the raw prompt. An image-only prompt produces `image_only` and no text. The backfill watermark
+does not depend on the two forms matching.
+
+## Entrypoint of a `claude -p` child (V10)
+
+The child that `/apprentice:preclassify` starts writes a transcript with entrypoint `sdk-cli`. Hooks do run in
+a `-p` child unless guarded, and an unguarded child fires SessionStart. The plugin guards in three ways:
+
+- the child environment sets `APPRENTICE_INTERNAL=1`, which makes every hook exit at once;
+- the `capture_entrypoints` filter drops `sdk-cli`;
+- the child runs with `--safe-mode --tools "" --no-session-persistence` and cwd `<home>/state`, which skips
+  plugins, hooks and MCP and cut the child's context from 62.7k to 2.5k tokens.
+
+A child that hits a usage limit exits 1 with a JSON envelope whose `is_error` is `true` and whose
+`api_error_status` is `429`, while `subtype` still says `success`. A batch counts as failed when the exit
+code is not 0, `is_error` is true, or `result` does not parse to a JSON array.
+
+## Inherited entrypoint (V12)
+
+Whether a `claude -p` started from a Bash tool inside an interactive session inherits `CLAUDE_CODE_ENTRYPOINT`
+is pending (C5). The guards above do not depend on the answer.
+
+## SessionStart output
+
+SessionStart is the only hook whose stdout reaches the session, and in the CLI it does. It prints at most two
+things: the content of a `CLAUDE.local.md` linked into a new worktree, and one tone-file line for the current
+account group.
