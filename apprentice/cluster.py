@@ -85,6 +85,12 @@ def key_string(key: Tuple[str, str, str, str]) -> str:
     return _KEY_SEP.join(key)
 
 
+def split_key(text: str) -> Optional[Tuple[str, str, str, str]]:
+    """The inverse of key_string; None for anything that is not a four-part key."""
+    parts = text.split(_KEY_SEP) if isinstance(text, str) else []
+    return (parts[0], parts[1], parts[2], parts[3]) if len(parts) == 4 else None
+
+
 def ask_rule_id(key: Tuple[str, str, str, str]) -> str:
     return "r_" + hashlib.sha1(("ask:" + key_string(key)).encode()).hexdigest()[:8]
 
