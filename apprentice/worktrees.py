@@ -6,7 +6,7 @@ import os
 from apprentice import gitinfo
 
 if False:  # annotations only: importing typing costs every hook start
-    from typing import Optional, Tuple
+    from typing import List, Optional, Tuple
 
 LOCAL_NAME = "CLAUDE.local.md"
 CONTENT_CAP = 8192
@@ -26,6 +26,50 @@ def _excluded(root: str) -> bool:
     if text is None:
         return False
     return any(line.strip() == LOCAL_NAME for line in text.splitlines())
+
+
+def ensure_exclude_line(main: str) -> str:
+    """Make git ignore CLAUDE.local.md in the checkout at `main`: "added", "present" or "failed"."""
+    path = gitinfo.exclude_path(main)
+    if path is None:
+        return "failed"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        existing = ""
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8", errors="surrogateescape") as fh:
+                existing = fh.read()
+        if any(line.strip() == LOCAL_NAME for line in existing.splitlines()):
+            return "present"
+        prefix = "" if not existing or existing.endswith("\n") else "\n"
+        with open(path, "a", encoding="utf-8", errors="surrogateescape") as fh:
+            fh.write(prefix + LOCAL_NAME + "\n")
+    except (OSError, ValueError):
+        return "failed"
+    return "added"
+
+
+def fan_out(main: str) -> List[dict]:
+    """Symlink every linked worktree's CLAUDE.local.md to the one in `main`, leaving anything already there."""
+    source = os.path.abspath(os.path.join(main, LOCAL_NAME))
+    results = []
+    for wt in gitinfo.worktrees(main):
+        dest = os.path.join(wt, LOCAL_NAME)
+        if os.path.lexists(dest):
+            if not os.path.islink(dest):
+                result = "skipped-file-exists"
+            elif os.path.realpath(dest) == os.path.realpath(source):
+                result = "present"
+            else:
+                result = "skipped-foreign-symlink"
+        else:
+            try:
+                os.symlink(source, dest)
+                result = "linked"
+            except OSError:
+                result = "skipped-file-exists"
+        results.append({"worktree": wt, "result": result})
+    return results
 
 
 def is_worktree(cwd: str) -> bool:

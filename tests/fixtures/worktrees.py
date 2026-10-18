@@ -26,6 +26,15 @@ def _linked(gitdir_parent, name, wt):
     _write(os.path.join(wt, ".git"), "gitdir: %s\n" % admin)
 
 
+def make_git_ready(paths):
+    """Give the hand-built stores objects/ and refs/ so a real `git ls-files` accepts them."""
+    stores = [os.path.join(paths["main"], ".git"), paths["bare"], paths["sepgit"],
+              os.path.join(paths["super"], ".git", "modules", "sub"), os.path.join(paths["super"], ".git")]
+    for store in stores:
+        for name in ("objects", "refs"):
+            os.makedirs(os.path.join(store, name), exist_ok=True)
+
+
 def build(tmp):
     """Create git-shaped trees under tmp without running git; return paths by name."""
     tmp = os.path.realpath(tmp)

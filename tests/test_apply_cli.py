@@ -5,7 +5,7 @@ import subprocess
 
 from apprentice import apply, config, ledger
 from tests.base import REPO_ROOT, ApprenticeTestCase
-from tests.fixtures import skills
+from tests.fixtures import gitrepo, skills, worktrees
 
 _SCRIPT = os.path.join(REPO_ROOT, "scripts", "apply.py")
 _FAKE_GH = os.path.join(REPO_ROOT, "tests", "fixtures", "fake-gh")
@@ -141,10 +141,126 @@ class GlobalApplyTest(ApplyCliCase):
             self.assertEqual(result.returncode, 2)
             self.assertIn("removed flag", result.stderr.decode())
 
-    def test_repo_scope_unavailable_before_t28(self):
-        result = self.run_script("--id", A, "--text-file", self.text_file(), "--scope", "repo")
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("result=skipped:repo-scope-unavailable", self.out(result))
+
+
+class RepoScopeCliTest(ApplyCliCase):
+    def setUp(self):
+        super().setUp()
+        self.tree = worktrees.build(os.path.join(self.fake_home, "trees"))
+        worktrees.make_git_ready(self.tree)
+        self.main = self.tree["main"]
+        self.local = os.path.join(self.main, "CLAUDE.local.md")
+        self.exclude = os.path.join(self.main, ".git", "info", "exclude")
+        alt = {"repo": {"acme/widgets": {"target": self.local, "status": "ok"}}}
+        self.write_pack([{"id": A, "kind": "correction", "topic": "a", "evidence_ids": ["e1"], "repos": ["acme/widgets"],
+                          "scope": "repo", "alt_targets": alt, "band": "high", "band_inputs": {"n": 4}},
+                         {"id": B, "kind": "correction", "topic": "b", "evidence_ids": ["e2"]}],
+                        {A: {"tokens": [["a1", "a2"]], "cluster_key": None, "n": 4},
+                         B: {"tokens": [["b1"]], "cluster_key": None, "n": 3}})
+
+    def repo_apply(self, *extra, target=None, pack=True):
+        args = ["--id", A, "--text-file", self.text_file(), "--scope", "repo", "--target", target or self.local]
+        if pack:
+            args += ["--pack", self.pack]
+        return self.run_script(*(args + list(extra)))
+
+    def exclude_lines(self):
+        return [line for line in self.read(self.exclude).splitlines() if line == "CLAUDE.local.md"]
+
+    def test_repo_scope_via_cli_creates_excluded_local_and_links(self):
+        result = self.repo_apply()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("result=written file=%s" % self.local, self.out(result))
+        self.assertEqual(self.exclude_lines(), ["CLAUDE.local.md"])
+        text = self.read(self.local)
+        self.assertIn("<!-- apprentice:start -->", text)
+        self.assertIn(TEXT, text)
+        for name in ("wt1", "wt2"):
+            self.assertEqual(os.readlink(os.path.join(self.tree[name], "CLAUDE.local.md")), self.local)
+        entry = self.proposals(A)[0]
+        self.assertEqual(entry["status"], "accepted")
+        self.assertEqual(entry["scope"], "repo")
+        self.assertEqual(entry["tokens"], [["a1", "a2"]])
+        self.assertIn(" n=4 high ", ledger.read_applied(self.home)[0]["line"])
+
+    def test_repo_scope_merged_ids_store_both_token_sets(self):
+        result = self.repo_apply("--merged-ids", B)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        entry = self.proposals(A)[0]
+        self.assertEqual(entry["merged_ids"], [B])
+        self.assertEqual(entry["tokens"], [["a1", "a2"], ["b1"]])
+
+    def test_repo_scope_without_pack_or_matching_target(self):
+        no_pack = self.repo_apply(pack=False)
+        self.assertEqual(no_pack.returncode, 1)
+        self.assertIn("result=skipped:no-pack", self.out(no_pack))
+        stranger = os.path.join(self.tree["sep"], "CLAUDE.local.md")
+        alt = {"repo": {"acme/widgets": {"target": self.local, "status": "ok"}}}
+        self.write_pack([{"id": A, "kind": "correction", "topic": "a", "evidence_ids": [],
+                          "repos": ["acme/widgets", "acme/gadgets"], "alt_targets": alt}], {})
+        other = self.repo_apply(target=stranger)
+        self.assertEqual(other.returncode, 1)
+        self.assertIn("result=skipped:bad-target", self.out(other))
+        self.assertFalse(os.path.lexists(self.local))
+        self.assertFalse(os.path.lexists(stranger))
+
+    def test_single_repo_candidate_needs_no_alt_target_entry(self):
+        self.write_pack([{"id": A, "kind": "correction", "topic": "a", "evidence_ids": [], "repos": ["acme/widgets"]}], {})
+        result = self.repo_apply()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(TEXT, self.read(self.local))
+
+    def test_repo_scope_dry_run_writes_nothing(self):
+        result = self.repo_apply("--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("+- " + TEXT, self.out(result))
+        self.assertFalse(os.path.lexists(self.local))
+        self.assertFalse(os.path.exists(self.exclude))
+
+    def test_replay_repo_target_adds_exclude_then_line(self):
+        self.assertEqual(self.repo_apply().returncode, 0)
+        with_rule = self.read(self.local)
+        self.write(self.local, "# notes\n")
+        self.write(self.exclude, "*.log\n")
+        replay = self.run_script("--replay")
+        self.assertEqual(replay.returncode, 0, replay.stderr)
+        self.assertIn("result=written", self.out(replay))
+        self.assertEqual(self.exclude_lines(), ["CLAUDE.local.md"])
+        self.assertIn(TEXT, self.read(self.local))
+        self.assertNotEqual(self.read(self.local), with_rule)
+        again = self.run_script("--replay")
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertIn("result=unchanged", self.out(again))
+        self.assertEqual(self.exclude_lines(), ["CLAUDE.local.md"])
+
+    def test_replay_dry_run_leaves_exclude_alone(self):
+        self.assertEqual(self.repo_apply().returncode, 0)
+        self.write(self.local, "# notes\n")
+        self.write(self.exclude, "*.log\n")
+        dry = self.run_script("--replay", "--dry-run")
+        self.assertIn("+- " + TEXT, self.out(dry))
+        self.assertEqual(self.read(self.exclude), "*.log\n")
+        self.assertEqual(self.read(self.local), "# notes\n")
+
+    def test_replay_committed_local_skipped_git_tracked_local(self):
+        repo = gitrepo.init_committed_local(self.fake_home)
+        if repo is None:
+            self.skipTest("git not installed")
+        with open(os.path.join(repo, ".git", "config"), "a", encoding="utf-8") as fh:
+            fh.write('[remote "origin"]\n\turl = https://example.test/acme/widgets.git\n')
+        target = os.path.join(repo, "CLAUDE.local.md")
+        exclude = os.path.join(repo, ".git", "info", "exclude")
+        ledger.record_decision(self.home, None, A, "accepted", text=TEXT, scope="repo", target=target)
+        ledger.append_applied(self.home, {"action": "apply", "id": A, "file": target, "result": "written",
+                                          "line": apply.render_line(A, TEXT, 4, "high", "2026-10-18")})
+        with open(target, "rb") as fh, open(exclude, "rb") as fx:
+            before = (fh.read(), fx.read())
+        for extra in ((), ("--confirm-tracked",)):
+            result = self.run_script("--replay", *extra)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("result=skipped:git-tracked-local", self.out(result))
+            with open(target, "rb") as fh, open(exclude, "rb") as fx:
+                self.assertEqual((fh.read(), fx.read()), before)
 
 
 class SkillTargetTest(ApplyCliCase):

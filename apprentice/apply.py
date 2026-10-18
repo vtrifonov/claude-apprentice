@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import time
 
-from apprentice import config, gitinfo, ledger, scrub
+from apprentice import config, gitinfo, ledger, scrub, worktrees
 
 if False:  # annotations only
     from typing import Callable, List, Optional, Tuple
@@ -359,7 +359,7 @@ def _outcome(result: str, path: Optional[str] = None, info: Optional[dict] = Non
             "remote_visibility": info.get("visibility") if info else None, "diff": out.get("diff")}
 
 
-def _pack_facts(args, home: str, merged_ids: Optional[List[str]]) -> Tuple[int, str, List[str]]:
+def pack_facts(args, home: str, merged_ids: Optional[List[str]]) -> Tuple[int, str, List[str]]:
     """(n, band, repos) for the candidate (and any merged ones) from the pack and its private sidecar."""
     if not args.pack:
         return 0, "manual", []
@@ -393,7 +393,7 @@ def apply_candidate(args, home: str, cfg: dict, real_home: str, merged_ids: Opti
         global_real = os.path.realpath(os.path.join(real_home, ".claude", "CLAUDE.md"))
         if info["root"] != _find_repo_root(global_real):
             return _outcome("skipped:repo-claude-md", path, info)
-    n, band, repos = _pack_facts(args, home, merged_ids)
+    n, band, repos = pack_facts(args, home, merged_ids)
     flagged = sensitive_check(args.text, info["tracked"], repos, cfg)
     if flagged:
         return _outcome("skipped:" + flagged, path, info)
@@ -405,6 +405,91 @@ def apply_candidate(args, home: str, cfg: dict, real_home: str, merged_ids: Opti
                                scope=args.scope, target=path, merged_ids=merged_ids,
                                profile=config.current_profile(os.environ))
     return _outcome(out["result"], path, info, out)
+
+
+def _repo_main(target: str, repo: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """(main checkout, error) for a repo-scope target: `<main>/CLAUDE.local.md` of the repo named `repo`."""
+    if os.path.basename(target) != worktrees.LOCAL_NAME:
+        return None, "skipped:bad-target"
+    main = os.path.realpath(os.path.dirname(target))
+    found = gitinfo.main_checkout(main)
+    if found is None:
+        return None, "skipped:no-main-checkout"
+    if found != main or (repo is not None and gitinfo.origin(main) != repo):
+        return None, "skipped:bad-target"
+    return main, None
+
+
+def _repo_index(main: str) -> Optional[str]:
+    """Refuse a CLAUDE.local.md that git tracks (or may track): its rules would be committed."""
+    tracked = gitinfo.is_tracked(main, worktrees.LOCAL_NAME)
+    if tracked is True:
+        return "skipped:git-tracked-local"
+    if tracked is None:
+        return "skipped:git-index-unknown"
+    return None
+
+
+def _create_local(path: str) -> bool:
+    if os.path.lexists(path):
+        return True
+    try:
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    except FileExistsError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _repo_dry_run(local: str, rule_id: str, text: str, n: int, band: str, date: str, home: str,
+                  cfg: Optional[dict]) -> dict:
+    if os.path.lexists(local):
+        return apply_rule_to_file(local, rule_id, text, n, band, date, home, dry_run=True, cfg=cfg)
+    clean = scrub.scrub(text, cfg if cfg is not None else config.load_config(home))[0] or ""
+    line = render_line(rule_id, clean, n, band, date)
+    new, result = upsert_rule("", line)
+    diff = "".join(difflib.unified_diff([], new.splitlines(True), local, local))
+    return {"result": result, "backup": None, "diff": diff, "line": line}
+
+
+def apply_repo(target: str, repo: str, rule_id: str, text: str, n: int, band: str, date: str, home: str,
+               cfg: Optional[dict], dry_run: bool, merged_ids: Optional[List[str]] = None,
+               pack: Optional[str] = None) -> dict:
+    """Write a rule to the main checkout's git-ignored CLAUDE.local.md, link it into the worktrees, ledger it."""
+    main, error = _repo_main(target, repo)
+    if error:
+        return _outcome(error, target)
+    error = _repo_index(main)
+    if error:
+        out = _outcome(error, target)
+        out["message"] = "git may track CLAUDE.local.md, so nothing was written; rescope this rule to global"
+        return out
+    local = os.path.join(main, worktrees.LOCAL_NAME)
+    flagged = sensitive_check(text, False, [repo], cfg)
+    if flagged:
+        return _outcome("skipped:" + flagged, local)
+    if dry_run:
+        out = _repo_dry_run(local, rule_id, text, n, band, date, home, cfg)
+        return _outcome(out["result"], local, None, out)
+    if worktrees.ensure_exclude_line(main) == "failed":
+        return _outcome("skipped:exclude-failed", local)
+    if not _create_local(local):
+        return _outcome("skipped:create-failed", local)
+    out = apply_rule_to_file(local, rule_id, text, n, band, date, home, dry_run=False, cfg=cfg)
+    outcome = _outcome(out["result"], local, None, out)
+    outcome["links"] = []
+    if out["result"] in ("written", "unchanged"):
+        outcome["links"] = worktrees.fan_out(main)
+        for link in outcome["links"]:
+            ledger.append_applied(home, {"action": "link", "id": rule_id,
+                                         "file": os.path.join(link["worktree"], worktrees.LOCAL_NAME),
+                                         "target": local, "result": link["result"]})
+        parsed = split_rule_line(out["line"])
+        ledger.record_decision(home, pack, rule_id, "accepted", text=parsed[0] if parsed else None,
+                               scope="repo", target=local, merged_ids=merged_ids,
+                               profile=config.current_profile(os.environ))
+    return outcome
 
 
 def _last_written(rows: List[dict], rule_id: str, actions: Tuple[str, ...]) -> Optional[dict]:
@@ -429,6 +514,17 @@ def undo(rule_id: str, home: str, cfg: Optional[dict], dry_run: bool = False) ->
     return out
 
 
+def _repo_replay_steps(path: str, dry_run: bool) -> Optional[str]:
+    """Steps -1, 0 and 1 for a stored repo target; the exclude line is repaired before any write."""
+    main, error = _repo_main(path, None)
+    if error is not None:
+        return "skipped:bad-target"
+    error = _repo_index(main)
+    if error is None and not dry_run and worktrees.ensure_exclude_line(main) == "failed":
+        error = "skipped:exclude-failed"
+    return error
+
+
 def _replay_one(rule_id: str, entry: dict, home: str, cfg: Optional[dict], confirm_tracked: bool,
                 dry_run: bool) -> dict:
     path, line = entry["file"], entry["line"]
@@ -438,13 +534,21 @@ def _replay_one(rule_id: str, entry: dict, home: str, cfg: Optional[dict], confi
 
     probe = write_target(path, transform, home, dry_run=True)
     out = {"id": rule_id, "file": path, "result": probe["result"], "backup": None, "diff": None}
+    repo_target = os.path.basename(path) == worktrees.LOCAL_NAME
+    if repo_target and not probe["result"].startswith("skipped:"):
+        error = _repo_replay_steps(path, dry_run)
+        if error:
+            out["result"] = error
+            return out
     if probe["result"] != "written":
         return out
-    info = inspect_target(path, cfg or {})
-    if info["tracked"] and not confirm_tracked:
-        out["result"] = "skipped:git-tracked"
-        return out
-    # T28: repo targets run the exclude and index steps here
+    if repo_target:
+        info = {"tracked": False, "visibility": None}
+    else:
+        info = inspect_target(path, cfg or {})
+        if info["tracked"] and not confirm_tracked:
+            out["result"] = "skipped:git-tracked"
+            return out
     if dry_run:
         out["diff"] = probe["diff"]
         return out

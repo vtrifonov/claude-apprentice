@@ -21,6 +21,8 @@ def _report(entries) -> int:
         if entry.get("id") is not None:
             line += " id=%s" % entry["id"]
         sys.stdout.write(line + "\n")
+        if entry.get("message"):
+            sys.stdout.write("note=%s\n" % entry["message"])
         if entry.get("diff"):
             sys.stdout.write(entry["diff"])
         if entry["result"].startswith("skipped:"):
@@ -43,8 +45,10 @@ def _read_text(path: str, home_dir: str):
 def _apply(args, home_dir: str, cfg: dict) -> int:
     if not args.id or not args.scope:
         return _fail("--id and --scope are required (or use --undo / --replay)")
-    if args.scope == "repo":
-        return _report([{"result": "skipped:repo-scope-unavailable", "file": None}])
+    if args.scope == "repo" and not args.pack:
+        return _report([{"result": "skipped:no-pack", "file": None}])
+    if args.scope == "repo" and not args.target:
+        return _report([{"result": "skipped:no-target", "file": None}])
     if not args.text_file:
         return _fail("--text-file is required")
     if args.pack and not os.path.isfile(args.pack):
@@ -61,8 +65,35 @@ def _apply(args, home_dir: str, cfg: dict) -> int:
         args.text = _read_text(args.text_file, home_dir)
     except ValueError as exc:
         return _fail(str(exc))
+    if args.scope == "repo":
+        return _report([_apply_repo(args, home_dir, cfg, merged)])
     outcome = apply.apply_candidate(args, home_dir, cfg, os.path.expanduser("~"), merged_ids=merged)
     return _report([outcome])
+
+
+def _repo_for_target(candidate: dict, target: str):
+    """The repo whose `alt_targets.repo` entry names `target`, else the candidate's only repo, else None."""
+    alt = candidate.get("alt_targets") if isinstance(candidate.get("alt_targets"), dict) else {}
+    entries = alt.get("repo") if isinstance(alt.get("repo"), dict) else {}
+    wanted = os.path.realpath(target)
+    for repo, entry in entries.items():
+        path = entry.get("target") if isinstance(entry, dict) else None
+        if isinstance(path, str) and os.path.realpath(path) == wanted:
+            return repo
+    repos = candidate.get("repos")
+    if isinstance(repos, list) and len(repos) == 1 and isinstance(repos[0], str):
+        return repos[0]
+    return None
+
+
+def _apply_repo(args, home_dir: str, cfg: dict, merged) -> dict:
+    candidate = ledger.pack_candidates(ledger.load_pack(args.pack)).get(args.id, {})
+    repo = _repo_for_target(candidate, args.target)
+    if repo is None:
+        return {"result": "skipped:bad-target", "file": args.target}
+    n, band, _repos = apply.pack_facts(args, home_dir, merged)
+    return apply.apply_repo(args.target, repo, args.id, args.text, n, band, config.utc_now_iso()[:10], home_dir,
+                            cfg, bool(args.dry_run), merged_ids=merged, pack=args.pack)
 
 
 def main(argv) -> int:
