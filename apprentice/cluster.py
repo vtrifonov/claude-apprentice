@@ -5,13 +5,20 @@ import hashlib
 import re
 from collections import Counter
 
-from apprentice import config
+from apprentice import config, lexicon
 from apprentice.scrub import TICKET_RE, mask_outbound
 
 if False:  # annotations only
-    from typing import Callable, Dict, List, Optional, Tuple
+    from typing import Callable, Dict, List, Optional, Set, Tuple
 
 STEM_FALLBACK_CHARS = 120
+PAIR_LIMIT = 150
+JACCARD_THRESHOLD = 0.5
+DROP_CONFIDENCE = 0.8
+LINK_SHARED_TOKENS = 2
+LINK_WINDOW_S = 120.0
+_CONTENT_TOKEN_RE = re.compile(r"[a-z][a-z0-9_'-]+")
+_SIGNAL_TAGS = ("correction", "standing")
 REVERSAL_WINDOW_S = 7 * 86400.0
 RECENT_WINDOW_S = 30 * 86400.0
 DISPLAY_QUESTIONS = 3
@@ -220,3 +227,133 @@ def reversal_30d(cluster: dict, now) -> bool:
         if later is not None and now_epoch - later <= RECENT_WINDOW_S:
             return True
     return False
+
+
+def content_tokens(text: Optional[str]) -> Set[str]:
+    return set(_CONTENT_TOKEN_RE.findall((text or "").lower())) - lexicon.stopwords()
+
+
+def jaccard(a: Set[str], b: Set[str]) -> float:
+    union = a | b
+    return len(a & b) / len(union) if union else 0.0
+
+
+def _has_signal(event: dict) -> bool:
+    return (bool(set(event.get("tags") or []) & set(_SIGNAL_TAGS))
+            or bool(event.get("after_interrupt")) or bool(event.get("after_rejected_ask")))
+
+
+def _recent_first(pair_or_event_ts, event_id) -> Tuple[Tuple[float, str], str]:
+    return (_ts_key(pair_or_event_ts), event_id or "")
+
+
+def select_pairs(events: List[dict], limit: int = PAIR_LIMIT,
+                 visible: Optional[Callable[[dict], bool]] = None) -> List[dict]:
+    """Correction candidates: prompts with a correction signal and a previous-assistant anchor, most recent first."""
+    chosen = [event for event in events
+              if event.get("kind") == "prompt" and event.get("prev_assistant") and _has_signal(event)]
+    chosen.sort(key=lambda event: _recent_first(event.get("ts"), event.get("id")), reverse=True)
+    return [{
+        "event": event,
+        "tokens": content_tokens(event.get("text")),
+        "visible": True if visible is None else bool(visible(event)),
+        "profile": event.get("profile"),
+        "ts": event.get("ts"),
+        "session_id": event.get("session_id"),
+        "repo": event.get("repo"),
+    } for event in chosen[:limit]]
+
+
+def _correction_group(seed_pair: dict, topic: Optional[str]) -> dict:
+    return {"seed": seed_pair["event"].get("id"), "pairs": [seed_pair], "tokens": set(seed_pair["tokens"]),
+            "topic": topic}
+
+
+def _finish_group(acc: dict) -> dict:
+    pairs = acc["pairs"]
+    earliest = min(pairs, key=lambda pair: _recent_first(pair["ts"], pair["event"].get("id")))
+    stamps = [pair["ts"] for pair in pairs if pair["ts"]]
+    visible_pairs = sum(1 for pair in pairs if pair["visible"])
+    return {
+        "id": "r_" + hashlib.sha1(("corr:" + str(earliest["event"].get("id"))).encode()).hexdigest()[:8],
+        "seed": acc["seed"],
+        "pairs": pairs,
+        "tokens": acc["tokens"],
+        "topic": acc["topic"],
+        "first_seen": min(stamps, key=_ts_key) if stamps else None,
+        "last_seen": max(stamps, key=_ts_key) if stamps else None,
+        "sessions": sorted({pair["session_id"] for pair in pairs if pair["session_id"]}),
+        "repos": sorted({pair["repo"] for pair in pairs if pair["repo"]}),
+        "visible_pairs": visible_pairs,
+        "withheld_pairs": len(pairs) - visible_pairs,
+        "strong_marker_pairs": sum(1 for pair in pairs if pair["event"].get("strong_marker")),
+    }
+
+
+def group_pairs(pairs: List[dict], preclass: Dict[str, dict]) -> List[dict]:
+    by_topic = {}  # type: Dict[str, dict]
+    by_overlap = []  # type: List[dict]
+    ordered = sorted(pairs, key=lambda pair: _recent_first(pair["ts"], pair["event"].get("id")), reverse=True)
+    for pair in ordered:
+        verdict = preclass.get(pair["event"].get("id")) or {}
+        if verdict.get("is_correction") is False and (verdict.get("confidence") or 0.0) >= DROP_CONFIDENCE:
+            continue
+        topic = verdict.get("topic")
+        if topic:
+            acc = by_topic.get(topic)
+            if acc is None:
+                by_topic[topic] = _correction_group(pair, topic)
+            else:
+                acc["pairs"].append(pair)
+            continue
+        for acc in by_overlap:
+            if jaccard(pair["tokens"], acc["tokens"]) >= JACCARD_THRESHOLD:
+                acc["pairs"].append(pair)
+                break
+        else:
+            by_overlap.append(_correction_group(pair, None))
+    groups = [_finish_group(acc) for acc in list(by_topic.values()) + by_overlap]
+    groups.sort(key=lambda found: (-len(found["pairs"]), found["id"]))
+    return groups
+
+
+def _cluster_tokens(found: dict) -> Set[str]:
+    return content_tokens("%s %s" % (found.get("header") or "", found.get("stem") or ""))
+
+
+def _pair_links(pair: dict, header_stem_tokens: Set[str], asks: List[Tuple[Optional[str], float]]) -> bool:
+    if pair["event"].get("after_rejected_ask"):
+        return True
+    if len(pair["tokens"] & header_stem_tokens) >= LINK_SHARED_TOKENS:
+        return True
+    epoch = config.ts_epoch(pair["ts"])
+    if epoch is None or not pair["session_id"]:
+        return False
+    for session_id, ask_epoch in asks:
+        if session_id == pair["session_id"] and 0.0 <= epoch - ask_epoch <= LINK_WINDOW_S:
+            return True
+    return False
+
+
+def link_groups_to_clusters(groups: List[dict], clusters: List[dict], events: List[dict]) -> Dict[str, List[str]]:
+    """Map each correction group to the ask clusters it plausibly answers."""
+    ask_by_id = {event.get("id"): event for event in events if event.get("kind") == "ask"}
+    cluster_tokens = {found["id"]: _cluster_tokens(found) for found in clusters}
+    cluster_asks = {}  # type: Dict[str, List[Tuple[Optional[str], float]]]
+    for found in clusters:
+        stamped = []
+        for row in found.get("rows") or []:
+            ask = ask_by_id.get(row.get("event_id"))
+            epoch = config.ts_epoch(ask.get("ts")) if ask else None
+            if ask is not None and epoch is not None:
+                stamped.append((ask.get("session_id"), epoch))
+        cluster_asks[found["id"]] = stamped
+    linked = {}  # type: Dict[str, List[str]]
+    for group in groups:
+        hits = []
+        for found in clusters:
+            if any(_pair_links(pair, cluster_tokens[found["id"]], cluster_asks[found["id"]])
+                   for pair in group["pairs"]):
+                hits.append(found["id"])
+        linked[group["id"]] = hits
+    return linked
