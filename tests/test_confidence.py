@@ -1,6 +1,8 @@
+import os
+import time
 from collections import Counter
 
-from apprentice import confidence
+from apprentice import cluster, confidence
 from tests.base import ApprenticeTestCase
 
 DAY1 = "2026-03-02T10:00:00.000Z"
@@ -92,10 +94,82 @@ class TwoSignalTest(ApprenticeTestCase):
         second = _pair(_prompt("e2", "ok then", ts=DAY1_LATER))
         self.assertIsNone(confidence.two_signal("correction", [first, second], []))
 
-    def test_withheld_event_cannot_prove_tag(self):
-        first = _pair({"id": "e1", "kind": "prompt", "ts": DAY1, "session_id": "s1", "strong_marker": True})
-        second = _pair({"id": "e2", "kind": "prompt", "ts": DAY1_LATER, "session_id": "s1"})
-        self.assertIsNone(confidence.two_signal("correction", [first, second], []))
+    def test_withheld_view_gives_same_path_as_visible_view(self):
+        weak = _prompt("e1", "use spaces", ts=DAY1, tags=["correction"])
+        strong = _prompt("e2", "remember that we never use tabs", ts=DAY1_LATER, strong_marker=True,
+                         tags=["standing"], after_interrupt=False)
+        seen = cluster.select_pairs([weak, strong])
+        hidden = cluster.select_pairs([weak, strong], visible=lambda event: event["id"] == "e1")
+        self.assertIn("text", seen[0]["event"])
+        self.assertNotIn("text", hidden[0]["event"])
+        self.assertEqual(confidence.two_signal("correction", seen, []), "strong-marker")
+        self.assertEqual(confidence.two_signal("correction", hidden, []), "strong-marker")
+
+    def test_withheld_marker_only_event_still_fails_tag(self):
+        weak = _prompt("e1", "use spaces", ts=DAY1, tags=["correction"])
+        marker = _prompt("e2", "from now on", ts=DAY1_LATER, strong_marker=True, tags=["standing"])
+        hidden = cluster.select_pairs([weak, marker], visible=lambda event: event["id"] == "e1")
+        self.assertIsNone(confidence.two_signal("correction", hidden, []))
+
+    def test_withheld_events_carry_explicit_anchor_flag(self):
+        event = _prompt("e1", "use spaces", tags=["correction"])
+        hidden = cluster.select_pairs([event], visible=lambda _event: False)[0]["event"]
+        self.assertIs(hidden["anchored"], True)
+        self.assertNotIn("prev_assistant", hidden)
+
+    def test_missing_anchor_keys_mean_not_anchored(self):
+        first = _pair(_prompt("e1", "use spaces", ts=DAY1))
+        keyless = {"id": "e2", "kind": "prompt", "ts": DAY4, "session_id": "s2", "text": "use spaces"}
+        self.assertFalse(confidence.independent(first["event"], keyless))
+        self.assertIsNone(confidence.two_signal("correction", [first, _pair(keyless)], []))
+        self.assertTrue(confidence.independent(first["event"], dict(keyless, anchored=True)))
+        self.assertFalse(confidence.independent(first["event"], dict(keyless, anchored=False, prev_assistant="x")))
+
+    def test_strong_marker_partner_with_only_interrupt_flag_passes(self):
+        # spec 10.5: two independent occurrences with at least one strong marker; the partner needs no correction text
+        strong = _pair(_prompt("e1", "remember that we never use tabs", strong_marker=True, ts=DAY1))
+        partner = _pair(_prompt("e2", "continue", ts=DAY1_LATER, after_interrupt=True))
+        self.assertEqual(confidence.two_signal("correction", [strong, partner], []), "strong-marker")
+
+    def test_three_thousand_same_session_asks_are_fast(self):
+        rows = [_ask_row("e%d" % index, ts="2026-03-02T10:%02d:00.000Z" % (index % 60)) for index in range(3000)]
+        started = time.time()
+        self.assertIsNone(confidence.two_signal("ask", rows, []))
+        self.assertLess(time.time() - started, 2.0)
+
+    def test_many_sessions_without_a_qualifying_pair_are_fast(self):
+        rows = [_ask_row("e%d" % index, session="s%d" % (index % 2)) for index in range(3000)]
+        started = time.time()
+        self.assertIsNone(confidence.two_signal("ask", rows, []))
+        self.assertLess(time.time() - started, 2.0)
+
+
+class LocalDayTest(ApprenticeTestCase):
+    LATE = "2026-03-02T23:30:00.000Z"
+    EARLY = "2026-03-03T00:30:00.000Z"
+
+    def path(self, tz):
+        old = os.environ.get("TZ")
+
+        def restore():
+            if old is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old
+            time.tzset()
+
+        self.addCleanup(restore)
+        os.environ["TZ"] = tz
+        time.tzset()
+        first = _pair(_prompt("e1", "run the build again", ts=self.LATE, session="s1"))
+        second = _pair(_prompt("e2", "run the build again", ts=self.EARLY, session="s2"))
+        return confidence.two_signal("correction", [first, second], [])
+
+    def test_utc_midnight_crossing_is_different_days(self):
+        self.assertEqual(self.path("UTC"), "different-days")
+
+    def test_local_time_decides_the_day(self):
+        self.assertIsNone(self.path("Pacific/Kiritimati"))
 
 
 def _band(n=5, sessions=3, repos=1, consistency=1.0, reversal_30d=False, has_reversal=False, path=None,

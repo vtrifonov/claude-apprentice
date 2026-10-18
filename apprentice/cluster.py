@@ -5,7 +5,7 @@ import hashlib
 import re
 from collections import Counter
 
-from apprentice import config, lexicon
+from apprentice import config, confidence, lexicon
 from apprentice.departures import ticket_prefix
 from apprentice.scrub import TICKET_RE, mask_outbound
 
@@ -273,6 +273,9 @@ def _withheld_event(event: dict) -> dict:
     """A non-visible prompt keeps its signal flags and ids, never its text, anchor, ticket, cwd or branch."""
     kept = {key: event.get(key) for key in _WITHHELD_EVENT_KEYS if key in event}
     kept["ticket"] = ticket_prefix(event.get("ticket"))
+    # derived booleans computed on the full event so a withheld view scores like the visible one
+    kept["own_strong"] = confidence.own_strong(event)
+    kept["anchored"] = bool(event.get("prev_assistant"))
     return kept
 
 

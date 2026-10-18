@@ -15,7 +15,7 @@ _ARTIFACTS = {}  # type: Dict[str, Set[str]]
 _SKIPPED_DIRS = frozenset(["node_modules", "__pycache__", "dist", "build", "venv", ".venv"])
 _NAME_RE = re.compile(r"""^\s*name\s*=\s*["']([^"']+)["']""")
 _PUNCT = ".,;:()\"'"
-_TOKEN_SPLIT_RE = re.compile(r"[\s`]+")
+_WS_SPLIT_RE = re.compile(r"\s+")
 _GIT_FIELDS = ("tracked", "root", "remote", "visibility", "public_mirror")
 _LOCAL_FILE = "CLAUDE.local.md"
 
@@ -99,17 +99,32 @@ def path_exists_in(main: str, token: str) -> bool:
 
 
 def names_repo_artifact(text: str, mains: List[str]) -> Optional[str]:
+    """A directory name counts only when written as a path or in backticks; package names count bare."""
     stop = lexicon.stopwords()
-    tokens = []
-    for raw in _TOKEN_SPLIT_RE.split((text or "").lower()):
-        token = raw.strip(_PUNCT)
+    tokens = []  # type: List[Tuple[str, bool]]
+    for raw in _WS_SPLIT_RE.split((text or "").lower()):
+        token = raw.replace("`", "").strip(_PUNCT)
         if len(token) >= 3 and token not in stop:
-            tokens.append(token)
+            tokens.append((token, "`" in raw))
     for main in mains:
         artifacts = repo_artifacts(main)
-        for token in tokens:
-            if token in artifacts or path_exists_in(main, token):
+        packages = _package_names(main) | _pyproject_names(main)
+        for token, ticked in tokens:
+            if token in packages or (ticked and token in artifacts) or path_exists_in(main, token):
                 return main
+    return None
+
+
+def _skill_named(text: str, names: List[str]) -> Optional[str]:
+    """A skill name counts as a match only as `/name`, `name skill` or in backticks."""
+    lowered = (text or "").lower()
+    for name in names:
+        if not name:
+            continue
+        escaped = re.escape(name.lower())
+        pattern = (r"(?<![\w-])/" + escaped + r"(?![\w-])|(?<![\w-])" + escaped + r"\s+skill\b|`" + escaped + "`")
+        if re.search(pattern, lowered):
+            return name
     return None
 
 
@@ -146,7 +161,7 @@ def infer_scope(kind: str, cluster_or_group: dict, cfg: dict, known_skill_names:
     found = cluster_or_group
     text = _visible_text(kind, found)
     if kind == "correction":
-        named = _names_in(text, known_skill_names)
+        named = _skill_named(text, known_skill_names)
         if named is not None:
             return "skill", named
         if _names_in(text, config.effective_tables(cfg)["phase_words"]) is not None:
@@ -170,6 +185,7 @@ class TargetResolver:
         self.real_home = real_home
         self.labels = labels
         self.tracked_cache = tracked_cache
+        self._profile_dirs = None  # type: Optional[List[str]]
 
     def _tracked(self, main: str) -> Optional[bool]:
         if main not in self.tracked_cache:
@@ -212,7 +228,9 @@ class TargetResolver:
         target = os.path.realpath(os.path.join(self.real_home, ".claude", "CLAUDE.md"))
         current = config.group_of_profile(config.current_profile(), self.cfg, self.labels)
         shared = set()
-        for path in status.profile_dirs(self.real_home):
+        if self._profile_dirs is None:
+            self._profile_dirs = status.profile_dirs(self.real_home)
+        for path in self._profile_dirs:
             base = os.path.basename(path.rstrip("/"))
             group = config.group_of_profile("default" if base == ".claude" else base, self.cfg, self.labels)
             claude_md = os.path.join(path, "CLAUDE.md")

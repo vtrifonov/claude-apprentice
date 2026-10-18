@@ -3,9 +3,10 @@ import os
 import re
 from typing import Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
-from apprentice import cluster, config, ledger
+from apprentice import cluster, config, ledger, scrub
 
-_NEGATION_RE = re.compile(r"\b(?:never|don'?t|no)\b")
+_NEGATION_RE = re.compile(r"\b(?:never|don'?t|do not|not|shouldn'?t|should not|avoid|no)\b")
+QUOTE_MAX = 200
 _BULLET_RE = re.compile(r"^\s*-\s")
 STEM_INHERIT_JACCARD = 0.5
 TOKEN_INHERIT_JACCARD = 0.5
@@ -56,7 +57,7 @@ def _negated(text: str) -> bool:
 
 
 def audit_target(summary_text: str, target_path: Optional[str], quote_allowed: bool,
-                 df: Mapping[str, int]) -> str:
+                 df: Mapping[str, int], cfg: Optional[dict] = None) -> str:
     if not target_path or not os.path.isfile(target_path):
         return "new"
     words = rarest_words(summary_text, df, 3)
@@ -72,14 +73,16 @@ def audit_target(summary_text: str, target_path: Optional[str], quote_allowed: b
     for unit in _units(lines):
         tokens = cluster.content_tokens(unit)
         hits = sum(1 for word in words if word in tokens)
-        if hits == len(words) and len(words) == 3:
-            return "already present"
+        # a reversal of an existing rule shares all its words; check the negation before calling it present
         if hits >= 2 and _negated(unit) != summary_negated:
             contradicting.append(unit)
+        elif hits == len(words):
+            return "already present"
     if not contradicting:
         return "new"
     if quote_allowed:
-        return "contradicts: " + contradicting[0]
+        quoted = scrub.scrub(contradicting[0], cfg if cfg is not None else config.load_config())[0] or ""
+        return "contradicts: " + quoted[:QUOTE_MAX]
     return "contradicts: %d line(s) in a target from other account groups (text withheld)" % len(contradicting)
 
 

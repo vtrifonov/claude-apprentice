@@ -30,10 +30,12 @@ def _event(item: dict) -> dict:
 
 
 def _has_anchor(event: dict) -> bool:
-    """Ask rows always follow an assistant turn; a withheld prompt drops the key but was selected with one."""
-    if event.get("kind") == "ask" or "prev_assistant" not in event:
+    """Ask rows always follow an assistant turn; a withheld prompt says so in `anchored`; no key means no anchor."""
+    if event.get("kind") == "ask":
         return True
-    return bool(event["prev_assistant"])
+    if "anchored" in event:
+        return bool(event["anchored"])
+    return bool(event.get("prev_assistant"))
 
 
 def independent(e1: dict, e2: dict) -> bool:
@@ -48,39 +50,75 @@ def independent(e1: dict, e2: dict) -> bool:
     return _has_anchor(e2)
 
 
-def _independent_pairs(events: List[dict]):
-    ordered = sorted(events, key=lambda event: (config.ts_epoch(event.get("ts")) or 0.0, event.get("id") or ""))
-    for index, later in enumerate(ordered):
-        for earlier in ordered[:index]:
-            if independent(earlier, later):
-                yield earlier, later
-
-
 def _local_day(ts) -> Optional[str]:
     epoch = config.ts_epoch(ts)
     return None if epoch is None else time.strftime("%Y-%m-%d", time.localtime(epoch))
 
 
-def _own_tag(event: dict) -> bool:
+def text_own_tag(text: Optional[str]) -> bool:
     """A correction or standing tag that survives removing the strong-marker phrase from the text."""
-    text = event.get("text")
     if not text:
         return False
     stripped = filters._STRONG_RE.sub(" ", text.lower())
     return any(tag in _OWN_TAGS for tag in filters.classify(stripped)["tags"])
 
 
+def own_strong(event: dict) -> bool:
+    """The event's own strong-marker result, computed on its full text."""
+    return bool(event.get("strong_marker")) and text_own_tag(event.get("text"))
+
+
+def _own_tag(event: dict) -> bool:
+    if not event.get("text") and "own_strong" in event:
+        return bool(event["own_strong"])
+    return text_own_tag(event.get("text"))
+
+
+def _different_days(ordered: List[dict]) -> bool:
+    days = [_local_day(event.get("ts")) for event in ordered]
+    sessions = [event.get("session_id") for event in ordered]
+    if len({day for day in days if day}) < 2 or len({session for session in sessions if session}) < 2:
+        return False
+    by_day = {}  # type: dict
+    for index, day in enumerate(days):
+        if day:
+            by_day.setdefault(day, []).append(index)
+    for later, day in enumerate(days):
+        if not day or not sessions[later]:
+            continue
+        for other_day, indexes in by_day.items():
+            if other_day == day:
+                continue
+            for earlier in indexes:
+                if earlier >= later:
+                    break
+                if sessions[earlier] and sessions[earlier] != sessions[later] \
+                        and independent(ordered[earlier], ordered[later]):
+                    return True
+    return False
+
+
+def _strong_with_partner(ordered: List[dict]) -> bool:
+    # spec 10.5: two independent occurrences, at least one strong; the partner needs no correction text of its own
+    for index, event in enumerate(ordered):
+        if not (event.get("strong_marker") and _own_tag(event)):
+            continue
+        for other_index, other in enumerate(ordered):
+            if other_index == index:
+                continue
+            earlier, later = (other, event) if other_index < index else (event, other)
+            if independent(earlier, later):
+                return True
+    return False
+
+
 def two_signal(kind: str, items: List[dict], links: List[str]) -> Optional[str]:
     events = [_event(item) for item in items]
-    for earlier, later in _independent_pairs(events):
-        day_a, day_b = _local_day(earlier.get("ts")), _local_day(later.get("ts"))
-        sessions = earlier.get("session_id"), later.get("session_id")
-        if day_a and day_b and day_a != day_b and all(sessions) and sessions[0] != sessions[1]:
-            return "different-days"
-    for earlier, later in _independent_pairs(events):
-        for event in (earlier, later):
-            if event.get("strong_marker") and _own_tag(event):
-                return "strong-marker"
+    ordered = sorted(events, key=lambda event: (config.ts_epoch(event.get("ts")) or 0.0, event.get("id") or ""))
+    if _different_days(ordered):
+        return "different-days"
+    if _strong_with_partner(ordered):
+        return "strong-marker"
     if links:
         return "ask-plus-correction"
     return None

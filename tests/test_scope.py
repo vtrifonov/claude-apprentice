@@ -76,9 +76,28 @@ class InferScopeTest(ScopeTestCase):
     def test_scope_skill_from_phase_word(self):
         found = _group([_pair("e1", "the shepherd should stop after one push")])
         self.assertEqual(self.infer("correction", found), ("skill", None))
-        named = _group([_pair("e1", "update plain-skill so it asks first")])
+        named = _group([_pair("e1", "update /plain-skill so it asks first")])
         self.assertEqual(self.infer("correction", named, names=["plain-skill"]), ("skill", "plain-skill"))
         self.assertEqual(self.infer("correction", named), ("global", None))
+
+    def test_skill_name_needs_slash_skill_word_or_backticks(self):
+        for text in ("run /review again", "the review skill is too noisy", "the `review` step is noisy"):
+            found = _group([_pair("e1", text)])
+            self.assertEqual(self.infer("correction", found, names=["review"]), ("skill", "review"), text)
+        plain = _group([_pair("e1", "do a quick review of the diff before pushing")])
+        self.assertEqual(self.infer("correction", plain, names=["review"]), ("global", None))
+
+    def test_generic_directory_words_do_not_force_repo_scope(self):
+        main = self.trees["main"]
+        for name in ("tests", "docs", "scripts", "src", "config"):
+            os.makedirs(os.path.join(main, name), exist_ok=True)
+        for text in ("always write tests first", "update the docs when behaviour changes", "keep config small"):
+            found = _group([_pair("e1", text, repo="acme/widgets"), _pair("e2", "x", ts=OLDER, repo="acme/gadgets")])
+            self.assertEqual(self.infer("correction", found, mains=[main]), ("global", None), text)
+        for text in ("keep helpers under `scripts` small", "put new cases in tests/", "edit src/app.py less"):
+            self.write(os.path.join(main, "src", "app.py"), "x\n")
+            found = _group([_pair("e1", text, repo="acme/widgets"), _pair("e2", "x", ts=OLDER, repo="acme/gadgets")])
+            self.assertEqual(self.infer("correction", found, mains=[main]), ("repo", None), text)
 
     def test_scope_repo_single_repo_evidence(self):
         found = _ask([_row(repo="acme/widgets"), _row(repo="acme/widgets")])
@@ -104,8 +123,10 @@ class InferScopeTest(ScopeTestCase):
         main = self.trees["main"]
         os.makedirs(os.path.join(main, "services"))
         rows = [_row(repo="acme/widgets"), _row(repo="acme/gadgets")]
-        named = _ask(rows, questions=["Should services own the retry policy?"])
+        named = _ask(rows, questions=["Should `services` own the retry policy?"])
         self.assertEqual(self.infer("ask", named, mains=[main]), ("repo", None))
+        bare = _ask(rows, questions=["Should services own the retry policy?"])
+        self.assertEqual(self.infer("ask", bare, mains=[main]), ("global", None))
         missing = _ask(rows, questions=["Is src/nope.py the right place?"])
         self.assertEqual(self.infer("ask", missing, mains=[main]), ("global", None))
         escape = _ask(rows, questions=["Read ../etc please"])
@@ -260,6 +281,14 @@ class GlobalTargetTest(ScopeTestCase):
         self.assertEqual(found["target"], os.path.realpath(self.target))
         self.assertEqual(found["target_shared_groups"], ["group-2", "group-3"])
         self.assertNotIn(".claude-aaa", repr(found))
+
+    def test_profile_dirs_listed_once_per_resolver(self):
+        resolver = self.resolver()
+        with mock.patch.object(scope.status, "profile_dirs", wraps=scope.status.profile_dirs) as listed:
+            resolver.global_target()
+            resolver.global_target()
+            resolver.alt_targets("global", None, {}, {})
+        self.assertEqual(listed.call_count, 1)
 
     def test_global_target_shared_groups_configured_names(self):
         self.cfg = dict(self.cfg, account_groups={"work": [".claude-aaa"], "home": [".claude-bbb", "default"]})
