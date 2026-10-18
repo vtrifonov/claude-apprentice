@@ -9,6 +9,8 @@ The profile files are per account group (`profile/tone-<slug>.json` and `.md`); 
 current group's file, and the global pointer rule tells the session to use that file and no other."""
 from __future__ import annotations
 
+import argparse
+import difflib
 import hashlib
 import json
 import os
@@ -17,7 +19,7 @@ import string
 from collections import Counter
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
-from apprentice import cluster, config, distill, events, lexicon
+from apprentice import apply, cluster, config, distill, events, lexicon, tmpfiles
 from apprentice.scrub import EMAIL_RE, TICKET_RE, UUID_RE, mask_outbound, scrub
 
 PRECISION = 6
@@ -647,18 +649,41 @@ def _validated_model(data: dict, cfg: dict) -> dict:
     return model
 
 
+def _read_model_file(home: str, model_file: str) -> dict:
+    """The model file's JSON; it must lie under state/tmp and is deleted once read, whatever happens next."""
+    try:
+        raw, error = tmpfiles.read(home, model_file, "--set-model file")
+    finally:
+        tmpfiles.discard(home, model_file)
+    if error:
+        raise ToneError(error)
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise ToneError("cannot read model file %s: %s" % (model_file, exc.__class__.__name__))
+    if not isinstance(data, dict):
+        raise ToneError("model file %s is not a JSON object" % model_file)
+    return data
+
+
 def set_model(home: str, env: Mapping, cfg: dict, model_file: str) -> dict:
     """Store the model's band, justification and optional prose in the current group's JSON (every other key is
-    left as it is, and any other key in `model_file` is ignored), then re-render the markdown."""
+    left as it is, and any other key in `model_file` is ignored), then re-render the markdown. The band now
+    reflects the current inputs: `reassess_band` is cleared and `model.assessed_inputs` keeps a copy of them,
+    the baseline the next refresh compares against."""
+    data = _read_model_file(home, model_file)
     group = _current_group(home, env, cfg)
     if not group:
         raise ToneError("no account group for the current profile: run tone.py without flags first")
     json_path, md_path = profile_paths(home, group)
     if not os.path.exists(json_path):
         raise ToneError("no tone profile for account group %s: run tone.py without flags first" % group)
-    model = _validated_model(_load_json(model_file, "model file"), cfg)
+    model = _validated_model(data, cfg)
     profile = _load_json(json_path, "tone profile")
+    inputs = (profile.get("metrics") or {}).get("proficiency_inputs")
+    model["assessed_inputs"] = dict(inputs) if isinstance(inputs, dict) else {}
     profile["model"] = model
+    profile["reassess_band"] = False
     _write_private(json_path, _dump(profile))
     _write_private(md_path, render_md(profile))
     return profile
@@ -674,7 +699,8 @@ def _moved(old: Any, new: Any) -> bool:
 
 def refresh(home: str, env: Mapping, cfg: dict, real_home: str) -> dict:
     """Recompute the profile, keep the previous `model`, and set `reassess_band` when any proficiency input moved
-    by more than 10% relative to the previous build."""
+    by more than 10% relative to the inputs the band was assessed on (`model.assessed_inputs`), or to the
+    previous build when the model stores none."""
     profile = build_profile(home, env, cfg, real_home)
     previous = {}  # type: Dict[str, Any]
     if profile["group"]:
@@ -682,7 +708,9 @@ def refresh(home: str, env: Mapping, cfg: dict, real_home: str) -> dict:
         if os.path.exists(json_path):
             previous = _load_json(json_path, "tone profile")
     profile["model"] = previous.get("model") if isinstance(previous.get("model"), dict) else {}
-    old_inputs = ((previous.get("metrics") or {}).get("proficiency_inputs") or {}) if previous else {}
+    old_inputs = profile["model"].get("assessed_inputs")
+    if not isinstance(old_inputs, dict):
+        old_inputs = ((previous.get("metrics") or {}).get("proficiency_inputs") or {}) if previous else {}
     new_inputs = profile["metrics"]["proficiency_inputs"]
     profile["reassess_band"] = bool(old_inputs) and any(_moved(old_inputs.get(name), new_inputs.get(name))
                                                         for name in new_inputs)
@@ -700,13 +728,71 @@ def display_name_set(home: str) -> bool:
 
 
 def set_display_name(home: str, name: str) -> dict:
-    """Merge `display_name` into config.json (temp file and replace); refuses a malformed config.json."""
+    """Merge `display_name` into config.json (temp file and replace); refuses a malformed config.json. A
+    symlinked config.json stays a link: the write goes to its realpath."""
     clean = (name or "").strip()
     if not clean or "\n" in clean or "\r" in clean or len(clean) > DISPLAY_NAME_CHARS:
         raise ToneError("display name must be one non-empty line of at most %d characters" % DISPLAY_NAME_CHARS)
     os.makedirs(home, mode=0o700, exist_ok=True)
-    path = os.path.join(home, "config.json")
+    path = os.path.realpath(os.path.join(home, "config.json"))
     data = _load_json(path, "config") if os.path.exists(path) else {}
     data["display_name"] = clean
     _write_private(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
     return data
+
+
+def set_display_name_from_file(home: str, name_file: str) -> dict:
+    """`set_display_name` with the name read from a file under state/tmp (one trailing newline dropped); the
+    file is deleted once read, so typed text never reaches a command line or outlives its use."""
+    try:
+        raw, error = tmpfiles.read(home, name_file, "--display-name-file")
+    finally:
+        tmpfiles.discard(home, name_file)
+    if error:
+        raise ToneError(error)
+    return set_display_name(home, raw[:-1] if raw.endswith("\n") else raw)
+
+
+def configured_display_name(cfg: dict) -> str:
+    """The pointer's name for the user; a missing, empty or non-string `display_name` counts as unset."""
+    name = cfg.get("display_name")
+    return name.strip() if isinstance(name, str) and name.strip() else config.DEFAULTS["display_name"]
+
+
+def _creation_diff(path: str, line: str, cfg: dict) -> dict:
+    """The dry-run outcome of installing `line` into a global CLAUDE.md that does not exist yet."""
+    new, result = apply.upsert_rule("", line)
+    diff = "".join(difflib.unified_diff([], new.splitlines(True), "/dev/null", path))
+    info = apply.inspect_target(path, cfg)
+    return {"result": result, "file": path, "line": line, "backup": None, "tracked": info["tracked"],
+            "remote_visibility": info["visibility"], "root": info["root"], "remote": info["remote"],
+            "diff": diff, "message": "global CLAUDE.md does not exist; installing creates it"}
+
+
+def install_pointer(home: str, cfg: dict, real_home: str, confirm_tracked: bool, dry_run: bool) -> dict:
+    """Install the tone pointer rule into the global CLAUDE.md through apply's global write path.
+
+    The pointer has no pack, so it is exempt from the tracked-target pack requirement, but a tracked global
+    still needs `confirm_tracked`. A missing global CLAUDE.md is created (0600) with the section: the user
+    asked to install. Returns apply's outcome dict."""
+    text = pointer_rule_text(configured_display_name(cfg))
+    path = os.path.join(real_home, ".claude", "CLAUDE.md")
+    created = False
+    if not os.path.lexists(path):
+        if dry_run:
+            line = apply.render_line(TONE_POINTER_ID, scrub(text, cfg)[0] or "", 0, "manual",
+                                     config.utc_now_iso()[:10])
+            return _creation_diff(path, line, cfg)
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+        created = True
+    args = argparse.Namespace(id=TONE_POINTER_ID, text=text, scope="global", target=None, pack=None,
+                              confirm_tracked=confirm_tracked, dry_run=dry_run)
+    outcome = apply.apply_candidate(args, home, cfg, real_home, allow_no_pack=True)
+    if created and outcome["result"] not in ("written", "unchanged"):
+        try:
+            if os.path.getsize(path) == 0:
+                os.unlink(path)
+        except OSError:
+            pass
+    return outcome

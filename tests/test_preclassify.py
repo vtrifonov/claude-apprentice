@@ -147,6 +147,16 @@ class FailureTest(_Base):
         self.assertEqual((summary["cached"], summary["skipped"], len(self.logged)), (0, 1, 1))
         self.assertEqual(preclassify.read_cache(self.home), {})
 
+    def test_empty_or_non_json_output_hints_at_safe_mode_auth(self):
+        hint = ("child failed under --safe-mode; settings-based auth (apiKeyHelper/env) is not loaded in "
+                "safe mode")
+        for mode, hinted in (("exit1", True), ("malformed", True), ("limit", False), ("iserror", False),
+                             ("notarray", False)):
+            self.logged = []
+            self.run_batches([_prompt(1)], env=dict(self.env, FAKE_CLAUDE_MODE=mode))
+            self.assertEqual(len(self.logged), 1, mode)
+            self.assertEqual(hint in self.logged[0], hinted, (mode, self.logged[0]))
+
     def test_lone_surrogate_in_text_does_not_abort(self):
         summary = self.run_batches([_prompt(1, text="no, use helper \ud800 one")])
         self.assertEqual(summary["cached"], 1)

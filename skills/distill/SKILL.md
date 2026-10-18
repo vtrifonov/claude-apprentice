@@ -5,11 +5,15 @@ description: Judgment step for /apprentice:suggest — word, show and review one
 
 # apprentice:distill
 
-Run by `/apprentice:suggest` after `scripts/distill.py` has built a pack. `<root>` is the plugin root, `<home>` is `${APPRENTICE_HOME:-~/.claude/apprentice}`, `<json>` is the pack JSON path. Every script call is one Bash call of the form `"${APPRENTICE_PYTHON:-/usr/bin/python3}" -I -S "<root>/scripts/<name>.py" …`.
+Run by `/apprentice:suggest` after `scripts/distill.py` has built a pack. `<root>` is the plugin root, `<home>` is `${APPRENTICE_HOME:-~/.claude/apprentice}`, `<json>` is the pack JSON path, and `<group>` is the value of the `group=<group>` line `scripts/distill.py` printed. Every script call is one Bash call of the form `"${APPRENTICE_PYTHON:-/usr/bin/python3}" -I -S "<root>/scripts/<name>.py" …`.
 
 ## Inputs
 
 The pack JSON path given by the command, and nothing else. Read `review/<pack>.json` and `review/<pack>.md` only. Never open `events/`, `ledger/`, `state/pack-private/` (the private sidecar) or other packs to recover text the pack withheld.
+
+## Temp files
+
+Text reaches the scripts only through files under `<home>/state/tmp/`, named with `<group>`: `<group>-<id>.txt` for rule text and `<group>-<id>.edit.txt` for a typed edit. `state/tmp/` is shared by every account group: never Read an existing file under `<home>/state/tmp/`; just Write the file anew. The scripts delete each file once used (apply keeps it after a dry run), and stale ones are swept after an hour.
 
 ## Per candidate: write the rule
 
@@ -32,10 +36,10 @@ scripts/ledger.py record --id <id> --status shown --pack <json> [--merged-ids <i
 
 ## Show one block
 
-Write the rule text to `<home>/state/tmp/<id>.txt` before the dry-run or any tracked block, and rewrite it after every edit. The dry-run for a tracked target is:
+Write the rule text to `<home>/state/tmp/<group>-<id>.txt` before EACH `apply.py` call (the dry run and the real apply alike), with the current wording after any edit. The dry-run for a tracked target is:
 
 ```
-scripts/apply.py --id <id> --text-file <home>/state/tmp/<id>.txt --scope <scope> --target <target> --pack <json> --confirm-tracked --dry-run
+scripts/apply.py --id <id> --text-file <home>/state/tmp/<group>-<id>.txt --scope <scope> --target <target> --pack <json> --confirm-tracked --dry-run
 ```
 
 `--confirm-tracked` only lets the dry run reach the diff; a dry run writes nothing and records nothing.
@@ -68,11 +72,13 @@ The Other field is always available. Free text wins over the pick and is read as
 
 ## Outcomes
 
-**Accept.** Write the final text to `<home>/state/tmp/<id>.txt`, then:
+**Accept.** Write the final text to `<home>/state/tmp/<group>-<id>.txt` (again, even right after a dry run), then:
 
 ```
-scripts/apply.py --id <id> --text-file <home>/state/tmp/<id>.txt --scope <scope> --target <target> --pack <json> [--merged-ids <id2>,<id3>] [--confirm-tracked]
+scripts/apply.py --id <id> --text-file <home>/state/tmp/<group>-<id>.txt --scope <scope> --target <target> --pack <json> [--merged-ids <id2>,<id3>] [--confirm-tracked]
 ```
+
+A real apply deletes the file, whatever its result.
 
 - Pass `--merged-ids` whenever the candidate was merged, with the same list given to its `ledger.py record` calls, so the `accepted` entry keeps the aliases and seed sets.
 - Pass `--confirm-tracked` only after `Accept into the tracked file`, or after `Accept` on a block that showed the tracking line and diff.
@@ -85,7 +91,7 @@ scripts/apply.py --id <id> --text-file <home>/state/tmp/<id>.txt --scope <scope>
 
 **Later.** `scripts/ledger.py record --id <id> --status snoozed --pack <json>`.
 
-**Edit or free text.** Write the user's words, as typed, to `<home>/state/tmp/<id>.edit.txt`, then run `scripts/ledger.py record --id <id> --status edited --user-edit-file <home>/state/tmp/<id>.edit.txt --pack <json>`. Never put the user's text on the command line. Rewrite `<home>/state/tmp/<id>.txt` with the edited rule, then re-show once with the edit applied and the same picker. Further edits repeat.
+**Edit or free text.** Write the user's words, as typed, to `<home>/state/tmp/<group>-<id>.edit.txt`, then run `scripts/ledger.py record --id <id> --status edited --user-edit-file <home>/state/tmp/<group>-<id>.edit.txt --pack <json>`, which deletes the file. Never put the user's text on the command line. Rewrite `<home>/state/tmp/<group>-<id>.txt` with the edited rule, then re-show once with the edit applied and the same picker. Further edits repeat.
 
 **Rescope.** `--scope` and `--target` both come from the chosen entry: its scope (`global`, `repo` or `skill`) and its `target`, on the dry-run and on apply alike. An entry with `target_git.tracked` true re-shows the block with the tracking line and the dry-run diff for that entry's scope and target, and Accept on it passes `--confirm-tracked`.
 - `global`: use `alt_targets.global`.

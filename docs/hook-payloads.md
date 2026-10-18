@@ -93,7 +93,7 @@ An image-only prompt has `text: null` and the `image_only` tag.
 ## Entrypoint
 
 `CLAUDE_CODE_ENTRYPOINT` is `cli` on every live interactive event. A payload `entrypoint` field wins when
-present; otherwise the environment variable, then the transcript head, decide. With none of them the event
+present; otherwise the environment variable, then the transcript tail (the last `POST_TAIL_BYTES`), decide. With none of them the event
 carries the `entrypoint_unknown` flag and is captured. Only entrypoints in `capture_entrypoints` (default `cli`,
 `claude-desktop`) are captured.
 

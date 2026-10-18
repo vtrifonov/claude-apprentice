@@ -3,7 +3,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 import argparse
 
-from apprentice import apply, config, ledger
+from apprentice import apply, config, ledger, tmpfiles
 
 _REMOVED_FLAGS = ("--include-unknown", "--all-profiles")
 _REMOVED_MESSAGE = "removed flag; set account_groups and unknown_group in config.json instead"
@@ -30,19 +30,16 @@ def _report(entries) -> int:
     return code
 
 
-def _read_text(path: str, home_dir: str):
-    tmp_root = os.path.realpath(os.path.join(home_dir, "state", "tmp"))
-    resolved = os.path.realpath(path)
-    if not resolved.startswith(tmp_root + os.sep):
-        raise ValueError("--text-file must be under %s" % tmp_root)
-    try:
-        with open(resolved, "r", encoding="utf-8") as fh:
-            return fh.read()
-    except (OSError, ValueError) as exc:
-        raise ValueError("cannot read --text-file: %s" % exc.__class__.__name__)
-
-
 def _apply(args, home_dir: str, cfg: dict) -> int:
+    try:
+        return _apply_text(args, home_dir, cfg)
+    finally:
+        # the skill rewrites the file before every call; a dry run keeps it for the real apply that follows
+        if args.text_file and not args.dry_run:
+            tmpfiles.discard(home_dir, args.text_file)
+
+
+def _apply_text(args, home_dir: str, cfg: dict) -> int:
     if not args.id or not args.scope:
         return _fail("--id and --scope are required (or use --undo / --replay)")
     if args.scope == "repo" and not args.pack:
@@ -61,10 +58,9 @@ def _apply(args, home_dir: str, cfg: dict) -> int:
         for member in merged:
             if member not in known:
                 return _fail("merged id is not a candidate of the pack: %s" % member)
-    try:
-        args.text = _read_text(args.text_file, home_dir)
-    except ValueError as exc:
-        return _fail(str(exc))
+    args.text, error = tmpfiles.read(home_dir, args.text_file, "--text-file")
+    if error:
+        return _fail(error)
     if args.scope == "repo":
         return _report([_apply_repo(args, home_dir, cfg, merged)])
     outcome = apply.apply_candidate(args, home_dir, cfg, os.path.expanduser("~"), merged_ids=merged)

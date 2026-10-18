@@ -441,18 +441,20 @@ _PACK_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})-(\d+)\.json$")
 _BAND_ORDER = ("high", "medium", "low")
 
 
-def _newest_pack(home_dir: str) -> Optional[Tuple[str, dict]]:
-    """(file name, pack) of the review pack with the latest day and number; None when there is none."""
+def _newest_pack(home_dir: str, group: Optional[str]) -> Tuple[bool, Optional[Tuple[str, dict]]]:
+    """(any pack exists, (file name, pack) of the newest pack built for `group` or None). `review/` is shared
+    by every account group, so another group's pack is never counted as this one's."""
     try:
         names = os.listdir(os.path.join(home_dir, "review"))
     except OSError:
-        return None
+        return False, None
     ranked = sorted((m.group(1), int(m.group(2)), n) for n in names for m in [_PACK_RE.match(n)] if m)
     for _day, _num, name in reversed(ranked):
         pack = _read_json(os.path.join(home_dir, "review", name))
-        if pack is not None:
-            return name, pack
-    return None
+        inputs = pack.get("inputs") if isinstance(pack, dict) else None
+        if isinstance(inputs, dict) and inputs.get("group") == group:
+            return True, (name, pack)
+    return bool(ranked), None
 
 
 def _band_counts(candidates: list, hidden: set) -> str:
@@ -470,23 +472,36 @@ def _age_days(epoch: float, now: float) -> str:
     return _plural(max(0, int((now - epoch) // 86400)), "day") + " old"
 
 
-def _review_rows(home_dir: str, now: float) -> List[List[str]]:
+def _hidden_ids(proposals: List[dict], candidates: list) -> set:
+    """Candidate ids hidden by the ledger: their own decided status hides them, or that of the primary they
+    were merged into."""
+    from apprentice import ledger
+    states = ledger.current_states(proposals)
+    alias = ledger.aliases(proposals)
+
+    def hiding(rule_id: Optional[str]) -> bool:
+        return rule_id in states and ledger.is_hiding(states[rule_id]["decided"].get("status"))
+
+    ids = [c.get("id") for c in candidates if isinstance(c, dict)]
+    return set(rid for rid in ids if hiding(rid) or hiding(alias.get(rid)))
+
+
+def _review_rows(home_dir: str, now: float, group: Optional[str]) -> List[List[str]]:
     """Milestone 2 rows: counts, dates and file names only, never candidate, rule or event text."""
     from apprentice import ledger
     rows = []  # type: List[List[str]]
     proposals = ledger.read_proposals(home_dir)
-    found = _newest_pack(home_dir)
+    any_pack, found = _newest_pack(home_dir, group)
     if found is None:
-        rows.append(["review pack", "no pack yet"])
+        rows.append(["review pack", "no pack yet for this group" if any_pack else "no pack yet"])
     else:
         name, pack = found
         stamp = pack.get("generated_at")
         day = stamp[:10] if isinstance(stamp, str) else _PACK_RE.match(name).group(1)
         rows.append(["review pack", "%s (%s)" % (day, name)])
-        hidden = set(rid for rid, state in ledger.current_states(proposals).items()
-                     if ledger.is_hiding(state["decided"].get("status")))
         cands = pack.get("candidates")
-        rows.append(["pending", _band_counts(cands if isinstance(cands, list) else [], hidden)])
+        cands = cands if isinstance(cands, list) else []
+        rows.append(["pending", _band_counts(cands, _hidden_ids(proposals, cands))])
     counts = ledger.totals(proposals)
     order = [s for s in ledger.STATUSES if s in counts] + sorted(s for s in counts if s not in ledger.STATUSES)
     rows.append(["ledger", ", ".join("%s %d" % (s, counts[s]) for s in order) or "none"])
@@ -582,7 +597,8 @@ def report(home: str, env: Mapping, home_dir_for_profiles: Optional[str] = None,
     kinds = _kind_table(tally)
     if kinds:
         blocks.append("\n".join(kinds))
-    blocks.append("\n".join(_md_table(["review", "state"], _review_rows(home, now))))
+    group = config.group_of_profile(config.current_profile(env), cfg, config.read_group_labels(home))
+    blocks.append("\n".join(_md_table(["review", "state"], _review_rows(home, now, group))))
     notes = []  # type: List[Optional[str]]
     if profiles.shared:
         notes.append("ℹ transcripts are shared across %d profiles; set profile_rules in config.json "

@@ -10,7 +10,7 @@ Review learned-rule candidates one by one.
 
 2. With `--preclassify` in `$ARGUMENTS`: run `"${APPRENTICE_PYTHON:-/usr/bin/python3}" -I -S "<root>/scripts/preclassify.py"` first and remove the flag from the arguments. If it fails, print its one-line message and continue.
 
-3. Run `"${APPRENTICE_PYTHON:-/usr/bin/python3}" -I -S "<root>/scripts/distill.py"` with the remaining arguments. It prints the paths of `<pack>.json` and `<pack>.md`. If the call exits with 126 or 127, or stderr mentions `xcrun`, the Python interpreter is missing: say so, name the README remedy (`xcode-select --install`, or set `APPRENTICE_PYTHON` to a Python 3.9 or newer interpreter), and stop.
+3. Run `"${APPRENTICE_PYTHON:-/usr/bin/python3}" -I -S "<root>/scripts/distill.py"` with the remaining arguments. It prints the paths of `<pack>.json` and `<pack>.md`, then a `group=<group>` line; pass `<group>` to the skill, which names its temp files with it. If the call exits with 126 or 127, or stderr mentions `xcrun`, the Python interpreter is missing: say so, name the README remedy (`xcode-select --install`, or set `APPRENTICE_PYTHON` to a Python 3.9 or newer interpreter), and stop.
 
 4. Invoke the skill `apprentice:distill` with the Skill tool. If the tool rejects the name, print `apprentice:distill skill not found` and stop. Never review without it.
 

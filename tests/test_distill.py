@@ -497,9 +497,10 @@ class PackTest(DistillTestCase):
                                 universal_newlines=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         lines = result.stdout.splitlines()
-        self.assertEqual(len(lines), 2)
+        self.assertEqual(len(lines), 3)
         self.assertTrue(lines[0].endswith(".json") and os.path.isfile(lines[0]))
         self.assertTrue(lines[1].endswith(".md") and os.path.isfile(lines[1]))
+        self.assertTrue(lines[2].startswith("group="), lines[2])
         for flag in ("--include-unknown", "--all-profiles"):
             result = subprocess.run(["/usr/bin/python3", "-I", "-S", _SCRIPT, flag], stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE, env=env, universal_newlines=True)
@@ -757,3 +758,25 @@ class MarkdownTest(DistillTestCase):
         self.assertNotIn("- Tracking: tracked in git", md)
         # the three repo asks have a null skill; the skill ask names one and corrections never get the line
         self.assertEqual(md.count("- Asking skill unknown"), 3)
+
+
+class LabelOrderTest(DistillTestCase):
+    def test_labels_ignore_since_and_run_order(self):
+        from apprentice import tone
+
+        def seed(home):
+            self.add([prompt_event(profile="old-prof", ts="2030-01-01T10:00:00.000Z"),
+                      prompt_event(profile="new-prof", ts="2030-03-01T10:00:00.000Z")], home)
+
+        distill_first = os.path.realpath(tempfile.mkdtemp())
+        tone_first = os.path.realpath(tempfile.mkdtemp())
+        self._tmp_dirs.extend([distill_first, tone_first])
+        seed(distill_first)
+        seed(tone_first)
+        env = {"CLAUDE_CONFIG_DIR": "/nowhere/new-prof"}
+        cfg = config.load_config(distill_first)
+        distill.build_pack(distill_first, env, cfg, "2030-02", None, None, False, 10, self.fake_home)
+        tone.build_profile(tone_first, env, cfg, self.fake_home)
+        expected = {"old-prof": "group-1", "new-prof": "group-2"}
+        self.assertEqual(config.read_group_labels(distill_first), expected)
+        self.assertEqual(config.read_group_labels(tone_first), expected)

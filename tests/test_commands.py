@@ -90,11 +90,19 @@ class CommandsTest(ApprenticeTestCase):
 
     def test_skill_tracked_dry_run_line_and_text_file_first(self):
         text = _read(SKILL)
-        self.assertIn("scripts/apply.py --id <id> --text-file <home>/state/tmp/<id>.txt --scope <scope> "
+        self.assertIn("scripts/apply.py --id <id> --text-file <home>/state/tmp/<group>-<id>.txt --scope <scope> "
                       "--target <target> --pack <json> --confirm-tracked --dry-run", text)
         self.assertNotIn("--text-file <file>", text)
-        self.assertIn("Write the rule text to `<home>/state/tmp/<id>.txt` before the dry-run or any tracked block, "
-                      "and rewrite it after every edit", text)
+        self.assertIn("Write the rule text to `<home>/state/tmp/<group>-<id>.txt` before EACH `apply.py` call "
+                      "(the dry run and the real apply alike)", text)
+
+    def test_temp_files_carry_the_group_tag(self):
+        text = _read(SKILL)
+        suggest = _read(SUGGEST)
+        for needle in ("group=<group>", "never Read an existing file under `<home>/state/tmp/`"):
+            self.assertIn(needle, text)
+        self.assertIn("group=<group>", suggest)
+        self.assertNotRegex(text, r"state/tmp/<id>")
 
     def test_skill_tracked_rule_covers_every_target(self):
         text = _read(SKILL)
@@ -103,7 +111,7 @@ class CommandsTest(ApprenticeTestCase):
 
     def test_skill_user_edit_goes_through_a_file(self):
         text = _read(SKILL)
-        self.assertIn("--user-edit-file <home>/state/tmp/<id>.edit.txt", text)
+        self.assertIn("--user-edit-file <home>/state/tmp/<group>-<id>.edit.txt", text)
         self.assertNotRegex(text, r"--user-edit(?!-file)")
 
     def test_skill_exit_2_rejected_picker_and_reason_prefix(self):

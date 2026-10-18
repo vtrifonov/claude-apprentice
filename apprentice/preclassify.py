@@ -28,6 +28,8 @@ TIMEOUT_S = 120
 MODEL = "haiku"
 # --safe-mode with an empty tool list: no tools, MCP servers or other plugins' hooks in the child (probed with OAuth).
 EXTRA_CHILD_ARGS = ["--no-session-persistence", "--safe-mode", "--tools", ""]  # type: List[str]
+# added to a batch failure whose child output is empty or not JSON, the likeliest symptom of missing auth
+SAFE_MODE_HINT = "child failed under --safe-mode; settings-based auth (apiKeyHelper/env) is not loaded in safe mode"
 TOPIC_MAX_WORDS = 4
 TOPIC_MAX_CHARS = 60
 SKETCH_MAX_CHARS = 200
@@ -175,10 +177,21 @@ def _run_child(binary: str, prompt: str, env, cwd: str) -> object:
         return "cannot run the claude binary"
     except Exception as exc:  # any other child failure only skips the batch
         return "child run failed (%s)" % exc.__class__.__name__
+    stdout = proc.stdout.decode("utf-8", "replace")
+    hint = "" if _is_json(stdout) else "; " + SAFE_MODE_HINT
     if proc.returncode != 0:
         # a limit failure still carries a JSON envelope; the exit status alone decides
-        return "exit status %d" % proc.returncode
-    return _parse_envelope(proc.stdout.decode("utf-8", "replace"))
+        return "exit status %d%s" % (proc.returncode, hint)
+    outcome = _parse_envelope(stdout)
+    return outcome + hint if isinstance(outcome, str) else outcome
+
+
+def _is_json(stdout: str) -> bool:
+    try:
+        json.loads(stdout)
+    except ValueError:
+        return False
+    return True
 
 
 def run_batches(pairs: List[dict], home: str, env, max_batches: Optional[int],

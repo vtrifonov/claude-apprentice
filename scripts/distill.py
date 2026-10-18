@@ -3,7 +3,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 import argparse
 
-from apprentice import config, distill
+from apprentice import config, distill, tmpfiles
 
 _REMOVED_FLAGS = ("--include-unknown", "--all-profiles")
 _REMOVED_MESSAGE = "removed flag; set account_groups and unknown_group in config.json instead"
@@ -44,10 +44,13 @@ def main(argv) -> int:
     args = parser.parse_args(argv)
     home_dir = config.home()
     config.ensure_dirs(home_dir)
+    tmpfiles.sweep(home_dir)
     pack, private = distill.build_pack(home_dir, os.environ, config.load_config(home_dir), args.since, args.repo,
                                        args.scope, args.include_all, args.limit, os.path.expanduser("~"))
     for path in distill.write_pack(home_dir, pack, private):
         sys.stdout.write(path + "\n")
+    # the prefix of the skill's temp file names under state/tmp
+    sys.stdout.write("group=%s\n" % tmpfiles.group_tag(pack["inputs"].get("group")))
     return 0
 
 

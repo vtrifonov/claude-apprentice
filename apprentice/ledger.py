@@ -34,6 +34,24 @@ def strip_private(value):
     return value
 
 
+# Free text an entry carries verbatim; blanked when another account group recorded the entry.
+FREE_TEXT_FIELDS = ("text", "user_edit", "reason")
+
+
+def entry_group(entry: dict) -> Optional[str]:
+    if "group" in entry:
+        return entry.get("group")
+    inputs = entry.get("inputs")
+    return inputs.get("group") if isinstance(inputs, dict) else None
+
+
+def for_group(entry: dict, group: Optional[str]) -> dict:
+    """`entry` with FREE_TEXT_FIELDS set to null unless `group` recorded it (ids are inherited across groups)."""
+    if entry_group(entry) == group:
+        return entry
+    return dict(entry, **{key: None for key in FREE_TEXT_FIELDS})
+
+
 def _ledger_file(home_dir: str, name: str) -> str:
     return os.path.join(home_dir, "ledger", name)
 

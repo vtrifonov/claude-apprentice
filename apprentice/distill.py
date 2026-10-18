@@ -542,10 +542,11 @@ def build_pack(home: str, env: Mapping, cfg: dict, since: Optional[str], repo: O
     """The review pack and its private sidecar mapping (token sets and ledger fields per listed candidate)."""
     now = config.utc_now_iso()
     floor = since_epoch(since)
-    raw = [event for event in events.iter_events(home)
-           if floor is None or (config.ts_epoch(event.get("ts")) or 0.0) >= floor]
+    every = list(events.iter_events(home))
+    raw = [event for event in every if floor is None or (config.ts_epoch(event.get("ts")) or 0.0) >= floor]
     profile = config.current_profile(env)
-    labels = label_profiles(home, raw, cfg)
+    # label from every event, as tone does, so first-seen numbering does not depend on --since or run order
+    labels = label_profiles(home, every, cfg)
     if profile != "unknown" and profile not in labels and profile not in _grouped_profiles(cfg):
         labels = config.assign_group_labels(home, {profile: now})
     current_group = config.group_of_profile(profile, cfg, labels)

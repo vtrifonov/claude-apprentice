@@ -445,6 +445,33 @@ class UndoReplayTest(ApplyCliCase):
         self.assertIn(TEXT, self.read(real))
 
 
+class TextFileLifetimeTest(ApplyCliCase):
+    def test_real_apply_deletes_text_file_on_success_and_failure(self):
+        path = self.text_file(name="group-1-%s.txt" % A)
+        written = self.run_script("--id", A, "--text-file", path, "--scope", "global")
+        self.assertEqual(written.returncode, 0, written.stderr)
+        self.assertFalse(os.path.exists(path))
+        path = self.text_file(name="group-1-%s.txt" % A)
+        refused = self.run_script("--id", A, "--text-file", path, "--scope", "skill")
+        self.assertEqual(refused.returncode, 1)
+        self.assertFalse(os.path.exists(path))
+        path = self.text_file(name="group-1-%s.txt" % A)
+        bad = self.run_script("--id", A, "--text-file", path, "--scope", "global", "--merged-ids", B)
+        self.assertEqual(bad.returncode, 2)
+        self.assertFalse(os.path.exists(path))
+
+    def test_dry_run_keeps_text_file(self):
+        path = self.text_file(name="group-1-%s.txt" % A)
+        result = self.run_script("--id", A, "--text-file", path, "--scope", "global", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(os.path.exists(path))
+
+    def test_text_file_outside_tmp_is_never_deleted(self):
+        outside = self.write(os.path.join(self.home, "elsewhere.txt"), TEXT)
+        self.assertEqual(self.run_script("--id", A, "--text-file", outside, "--scope", "global").returncode, 2)
+        self.assertTrue(os.path.exists(outside))
+
+
 class UnitTest(ApprenticeTestCase):
     def test_sensitive_check_unit(self):
         cfg = config.load_config(self.home)

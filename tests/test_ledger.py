@@ -180,6 +180,49 @@ class ScriptTest(ApprenticeTestCase):
         self.assertEqual(entry["text"], "rule <redacted:custom>")
         self.assertEqual(entry["reason"], "why <redacted:custom>")
 
+    def test_record_deletes_its_temp_files_on_success_and_failure(self):
+        self.write_pack([{"id": "A", "kind": "correction", "topic": "a", "evidence_ids": []}])
+        edit = self.write(os.path.join(self.home, "state", "tmp", "g1-A.edit.txt"), "say it shorter")
+        text = self.write(os.path.join(self.home, "state", "tmp", "g1-A.txt"), "rule")
+        result = self.run_script("record", "--id", "A", "--status", "edited", "--pack", self.pack,
+                                 "--user-edit-file", edit, "--text-file", text)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(os.path.exists(edit))
+        self.assertFalse(os.path.exists(text))
+        self.assertEqual(self.entries("A")[-1]["user_edit"], "say it shorter")
+        edit = self.write(os.path.join(self.home, "state", "tmp", "g1-A.edit.txt"), "again")
+        missing = os.path.join(self.home, "review", "nope.json")
+        result = self.run_script("record", "--id", "A", "--status", "edited", "--pack", missing,
+                                 "--user-edit-file", edit)
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse(os.path.exists(edit))
+        outside = self.write(os.path.join(self.home, "elsewhere.txt"), "hi")
+        result = self.run_script("record", "--id", "A", "--status", "edited", "--pack", self.pack,
+                                 "--user-edit-file", outside)
+        self.assertEqual(result.returncode, 2)
+        self.assertTrue(os.path.exists(outside))
+
+    def test_show_blanks_free_text_of_other_groups(self):
+        self.write(os.path.join(self.home, "config.json"), json.dumps({"account_groups": {"g1": ["default"]}}))
+        ledger.append_proposal(self.home, {"id": "A", "status": "accepted", "group": "g1", "text": "own rule",
+                                           "user_edit": "own edit", "reason": "own reason", "scope": "global"})
+        ledger.append_proposal(self.home, {"id": "A", "status": "edited", "group": "g2", "text": "zqother rule",
+                                           "user_edit": "zqother edit", "reason": "zqother reason",
+                                           "scope": "global"})
+        ledger.append_proposal(self.home, {"id": "A", "status": "shown", "inputs": {"group": "g2"},
+                                           "text": "zqother inputs"})
+        ledger.append_proposal(self.home, {"id": "A", "status": "accepted", "group": None, "text": "zqnone"})
+        result = self.run_script("show", "--id", "A")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("zq", result.stdout.decode())
+        rows = self.shown("A")
+        self.assertEqual(len(rows), 4)
+        self.assertEqual((rows[0]["text"], rows[0]["user_edit"], rows[0]["reason"]),
+                         ("own rule", "own edit", "own reason"))
+        for row in rows[1:]:
+            self.assertEqual((row["text"], row["user_edit"], row["reason"]), (None, None, None))
+        self.assertEqual((rows[1]["status"], rows[1]["scope"]), ("edited", "global"))
+
     def test_script_record_reads_tokens_from_sidecar(self):
         self.write_pack([{"id": "A", "kind": "correction", "topic": "tabs", "evidence_ids": ["e1", "e2"],
                           "scope": "global", "target": "claude_md", "summary": "Use tabs"}])

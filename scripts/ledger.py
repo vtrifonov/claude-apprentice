@@ -4,7 +4,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 import argparse
 import json
 
-from apprentice import config, ledger
+from apprentice import config, ledger, tmpfiles
 
 _REMOVED_FLAGS = ("--include-unknown", "--all-profiles")
 _REMOVED_MESSAGE = "removed flag; set account_groups and unknown_group in config.json instead"
@@ -16,6 +16,14 @@ def _fail(message: str) -> int:
 
 
 def _record(args, home_dir: str) -> int:
+    try:
+        return _record_entry(args, home_dir)
+    finally:
+        for path in (args.text_file, args.user_edit_file):
+            tmpfiles.discard(home_dir, path)
+
+
+def _record_entry(args, home_dir: str) -> int:
     if not os.path.isfile(args.pack):
         return _fail("pack not found: %s" % args.pack)
     merged = [m for m in args.merged_ids.split(",") if m] if args.merged_ids else None
@@ -26,12 +34,12 @@ def _record(args, home_dir: str) -> int:
                 return _fail("merged id is not a candidate of the pack: %s" % member)
     text = None
     if args.text_file:
-        text, error = _read_tmp_file(home_dir, args.text_file, "--text-file")
+        text, error = tmpfiles.read(home_dir, args.text_file, "--text-file")
         if error:
             return _fail(error)
     user_edit = args.user_edit
     if args.user_edit_file:
-        user_edit, error = _read_tmp_file(home_dir, args.user_edit_file, "--user-edit-file")
+        user_edit, error = tmpfiles.read(home_dir, args.user_edit_file, "--user-edit-file")
         if error:
             return _fail(error)
     try:
@@ -46,23 +54,13 @@ def _record(args, home_dir: str) -> int:
     return 0
 
 
-def _read_tmp_file(home_dir: str, path: str, flag: str):
-    """(content, None) for a readable file under state/tmp, else (None, error message)."""
-    tmp_root = os.path.realpath(os.path.join(home_dir, "state", "tmp"))
-    resolved = os.path.realpath(path)
-    if not resolved.startswith(tmp_root + os.sep):
-        return None, "%s must be under %s" % (flag, tmp_root)
-    try:
-        with open(resolved, "r", encoding="utf-8") as fh:
-            return fh.read(), None
-    except (OSError, ValueError) as exc:
-        return None, "cannot read %s: %s" % (flag, exc.__class__.__name__)
-
-
 def _show(args, home_dir: str) -> int:
+    group = config.group_of_profile(config.current_profile(os.environ), config.load_config(home_dir),
+                                    config.read_group_labels(home_dir))
     for entry in ledger.read_proposals(home_dir):
         if entry.get("id") == args.id:
-            sys.stdout.write(json.dumps(ledger.strip_private(entry), ensure_ascii=False) + "\n")
+            sys.stdout.write(json.dumps(ledger.for_group(ledger.strip_private(entry), group),
+                                        ensure_ascii=False) + "\n")
     return 0
 
 
@@ -85,7 +83,8 @@ def main(argv) -> int:
     rec.add_argument("--reason")
     rec.add_argument("--n-at-decision", type=int)
     rec.add_argument("--merged-ids", help="comma-separated candidate ids merged into this one")
-    show = sub.add_parser("show", help="print the entries of one id as JSON lines, without sidecar fields")
+    show = sub.add_parser("show", help="print the entries of one id as JSON lines, without sidecar fields and "
+                               "with other groups' free text blanked (for manual inspection)")
     show.add_argument("--id", required=True)
     args = parser.parse_args(argv)
     home_dir = config.home()

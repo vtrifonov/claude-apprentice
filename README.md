@@ -55,7 +55,9 @@ A plain `install` enables the plugin for that profile. `/apprentice:status` list
 | `/apprentice:preclassify` | `[--since YYYY-MM] [--max-batches N]` | Opt-in. Sends correction pairs of the current profile to haiku so `suggest` groups them better. |
 | `/apprentice:backfill` | `[--since YYYY-MM] [--project=<slug>] [--dry-run]` | Reads past transcripts in the background and adds the events the live hooks did not capture. One run at a time. |
 
-There is also `scripts/ledger.py` (`record`, `show`), which the review skill uses to log outcomes other than accept.
+The review skill also calls `scripts/ledger.py record` to log outcomes other than accept. `scripts/ledger.py show --id <id>` is for manual inspection only; no command or skill runs it. It prints that id's ledger entries without the sidecar fields, and blanks `text`, `user_edit` and `reason` in entries recorded by another account group.
+
+Text never goes on a command line. The skill and `/apprentice:tone` Write it to a file under `<home>/state/tmp/` and pass the path (`--text-file`, `--user-edit-file`, `--set-model`, `--display-name-file`); any other path is refused. File names start with the group tag that `distill.py` and `tone.py` print on their `group=<tag>` line, for example `<tag>-<id>.txt`. Each script deletes its file once read (apply keeps it after a `--dry-run`, for the real apply that follows), and `distill.py` and `tone.py` delete any file in `state/tmp/` older than an hour when they start.
 
 ## Data root
 
@@ -66,7 +68,8 @@ config.json            your settings (optional)
 disabled               kill-switch marker file (optional)
 hook-errors.log        one line per hook error, never payload text
 events/YYYY-MM.jsonl   captured events, one JSON object per line
-ledger/                review outcomes per rule id
+ledger/                proposals.jsonl (review decisions) and applied.jsonl
+                       (apply, undo, replay and CLAUDE.local.md link rows)
 review/                <pack>.json and <pack>.md written by suggest
 profile/               tone-<group>.json and tone-<group>.md
 backups/               copies of rules files taken before apply edits them
@@ -79,13 +82,13 @@ Event fields are in [docs/record-schema.md](docs/record-schema.md), hook input s
 
 ## Privacy
 
-- Stored: AskUserQuestion questions, options and answers; your prompt text (at most 4 KB); and a short assistant text before a correction (at most 400 characters). Nothing else. No tool output, no file contents, no assistant replies.
+- Stored: AskUserQuestion questions, options and answers; your prompt text (at most 4,000 characters, or 300 for a pasted prompt); and a short assistant text before a correction (at most 400 characters). Nothing else. No tool output, no file contents, no assistant replies.
 - Every free-text field goes through a scrubber before it is written. Add your own regexes (employer, customer, service names) to `extra_redact_patterns`.
 - Counts and aggregates use every profile. Verbatim text enters a review pack or a tone file only from the current account group, so one account's wording never shows up in another's.
 - Emails stay on your machine. Anything that leaves it (preclassify, the review model) has them masked.
 - Hooks never fail a session: they exit 0, print nothing except the two SessionStart cases, and log one line to `hook-errors.log`.
 
-Rules for the `skill` scope may land in git-tracked files. Apprentice never commits them. A repo whose `CLAUDE.local.md` is committed gets no repo rules, because that file would publish them.
+Rules may land in git-tracked files: a skill's `SKILL.md`, or the global CLAUDE.md when it lives in a git work tree (for example symlinked into a config repo). Apply writes a tracked file only after you confirm it (`--confirm-tracked`), having seen the tracking line and the diff, and never commits it. A repo whose `CLAUDE.local.md` is committed gets no repo rules, because that file would publish them.
 
 ## Kill switch
 
@@ -121,14 +124,16 @@ Real group, profile and employer names never go into a committed file. Keep conf
 | `capture_entrypoints` | `["cli", "claude-desktop"]` | Entrypoints the hooks capture. Headless `sdk-cli` sessions are skipped. |
 | `retention_months` | `24` | Event files older than this many months are deleted at session start and skipped by backfill. |
 | `extra_redact_patterns` | `[]` | Extra regexes the scrubber and the apply check treat as sensitive. |
-| `display_name` | `the user` | Name the tone pointer uses. Set by the `/apprentice:tone` picker. |
+| `display_name` | `the user` | Name the tone pointer uses. Set by the `/apprentice:tone` picker while unset; a non-string value counts as unset. |
 | `own_email_domains` | `[]` | Email domains the scrubber treats as your own. |
 | `skill_hints`, `number_patterns`, `header_aliases`, `risk_words`, `phase_words` | built-in | Extend the built-in tables used to attribute and classify questions. |
 | `worktree_suffix` | `-worktrees` | Suffix of the worktree parent directory in a `<parent>/<name><suffix>/<dir>` layout, used to find the main checkout of a deleted worktree. |
 
 ## Tone file
 
-`/apprentice:tone` writes `profile/tone-<group>.md` for the current account group only. A session reaches it through its SessionStart line, which names the file for that session's own group and no other. The tone pointer rule in the global CLAUDE.md tells Claude to read that file only when the line is present. SessionStart output does reach the session in the CLI, so the pointer and the picker ship. Where it does not, mention the file by hand (V7, pending C5).
+`/apprentice:tone` writes `profile/tone-<group>.md` for the current account group only. A session reaches it through its SessionStart line, which names the file for that session's own group and no other. The tone pointer rule in the global CLAUDE.md tells Claude to read that file only when the line is present. SessionStart stdout reaches the session (seen live in the CLI); the worktree CLAUDE.local.md half of V7 is pending (C5). Where the line does not arrive, mention the file by hand.
+
+The command installs the pointer with `tone.py --install-pointer`. It first runs `--install-pointer --dry-run` and shows the diff. When the global CLAUDE.md is inside a git work tree, the picker offers `Install into the tracked file` (recommended only for a private remote) and then installs with `--confirm-tracked`. A missing global CLAUDE.md is created (mode 0600) with the apprentice section. A display name typed into the picker's Other field is stored only while none is set, through a file (`--display-name-file`), never as a command-line argument; with a name already set, Other text is answered as a reply and nothing is installed. Installing twice gives `result=unchanged`.
 
 ## Development
 

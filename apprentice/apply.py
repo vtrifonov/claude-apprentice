@@ -450,7 +450,8 @@ def _outcome(result: str, path: Optional[str] = None, info: Optional[dict] = Non
     out = out or {}
     return {"result": result, "file": path, "line": out.get("line"), "backup": out.get("backup"),
             "tracked": bool(info and info.get("tracked")),
-            "remote_visibility": info.get("visibility") if info else None, "diff": out.get("diff")}
+            "remote_visibility": info.get("visibility") if info else None, "diff": out.get("diff"),
+            "root": info.get("root") if info else None, "remote": info.get("remote") if info else None}
 
 
 def pack_facts(args, home: str, merged_ids: Optional[List[str]]) -> Tuple[int, str, List[str]]:
@@ -472,15 +473,20 @@ def pack_facts(args, home: str, merged_ids: Optional[List[str]]) -> Tuple[int, s
     return (n if isinstance(n, int) else 0), (band if isinstance(band, str) and band else "manual"), repos
 
 
-def apply_candidate(args, home: str, cfg: dict, real_home: str, merged_ids: Optional[List[str]] = None) -> dict:
-    """Write one accepted rule to its global or skill target and ledger it (every outcome, refusals included)."""
-    outcome = _apply_candidate(args, home, cfg, real_home, merged_ids)
+def apply_candidate(args, home: str, cfg: dict, real_home: str, merged_ids: Optional[List[str]] = None,
+                    allow_no_pack: bool = False) -> dict:
+    """Write one accepted rule to its global or skill target and ledger it (every outcome, refusals included).
+
+    `allow_no_pack` lifts the tracked-target pack requirement; only the tone pointer passes it (tone.py
+    --install-pointer), since that rule has no pack. `--confirm-tracked` is still required."""
+    outcome = _apply_candidate(args, home, cfg, real_home, merged_ids, allow_no_pack)
     if not args.dry_run:
         _record_apply(home, args.id, outcome)
     return outcome
 
 
-def _apply_candidate(args, home: str, cfg: dict, real_home: str, merged_ids: Optional[List[str]]) -> dict:
+def _apply_candidate(args, home: str, cfg: dict, real_home: str, merged_ids: Optional[List[str]],
+                     allow_no_pack: bool) -> dict:
     path, error = resolve_target(args.scope, args.target, getattr(args, "skill", None), cfg, real_home)
     if error:
         return _outcome(error)
@@ -488,7 +494,7 @@ def _apply_candidate(args, home: str, cfg: dict, real_home: str, merged_ids: Opt
     # A dry run writes nothing, and its diff is what the user must see before confirming a tracked target.
     if info["tracked"] and not args.confirm_tracked and not args.dry_run:
         return _outcome("skipped:git-tracked", path, info)
-    if info["tracked"] and not args.pack and not args.dry_run:
+    if info["tracked"] and not args.pack and not args.dry_run and not allow_no_pack:
         return _outcome("skipped:no-pack", path, info)
     real = os.path.realpath(path)
     if os.path.basename(real) == "CLAUDE.md" and info["root"] is not None:
