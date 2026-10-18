@@ -14,10 +14,14 @@ def _fail(message: str) -> int:
     return 2
 
 
-def _report(entries) -> int:
+_DRY_RESULTS = {"written": "would-write", "removed": "would-remove"}
+
+
+def _report(entries, dry_run: bool = False) -> int:
     code = 0
     for entry in entries:
-        line = "result=%s file=%s" % (entry["result"], entry.get("file") or "-")
+        shown = _DRY_RESULTS.get(entry["result"], entry["result"]) if dry_run else entry["result"]
+        line = "result=%s file=%s" % (shown, entry.get("file") or "-")
         if entry.get("id") is not None:
             line += " id=%s" % entry["id"]
         sys.stdout.write(line + "\n")
@@ -62,9 +66,9 @@ def _apply_text(args, home_dir: str, cfg: dict) -> int:
     if error:
         return _fail(error)
     if args.scope == "repo":
-        return _report([_apply_repo(args, home_dir, cfg, merged)])
+        return _report([_apply_repo(args, home_dir, cfg, merged)], args.dry_run)
     outcome = apply.apply_candidate(args, home_dir, cfg, os.path.expanduser("~"), merged_ids=merged)
-    return _report([outcome])
+    return _report([outcome], args.dry_run)
 
 
 def _repo_for_target(candidate: dict, target: str):
@@ -113,9 +117,9 @@ def main(argv) -> int:
     cfg = config.load_config(home_dir)
     if args.undo:
         out = apply.undo(args.undo, home_dir, cfg, dry_run=args.dry_run)
-        return _report([dict(entry, id=args.undo) for entry in out.get("results") or [out]])
+        return _report([dict(entry, id=args.undo) for entry in out.get("results") or [out]], args.dry_run)
     if args.replay:
-        return _report(apply.replay(home_dir, cfg, args.confirm_tracked, args.dry_run))
+        return _report(apply.replay(home_dir, cfg, args.confirm_tracked, args.dry_run), args.dry_run)
     return _apply(args, home_dir, cfg)
 
 

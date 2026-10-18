@@ -9,9 +9,9 @@ _REMOVED_FLAGS = ("--include-unknown", "--all-profiles")
 _REMOVED_MESSAGE = "removed flag; set account_groups and unknown_group in config.json instead"
 
 
-def _report_install(outcome: dict) -> int:
-    sys.stdout.write("result=%s file=%s id=%s\n" % (outcome["result"], outcome.get("file") or "-",
-                                                  tone.TONE_POINTER_ID))
+def _report_install(outcome: dict, dry_run: bool = False) -> int:
+    result = "would-write" if dry_run and outcome["result"] == "written" else outcome["result"]
+    sys.stdout.write("result=%s file=%s id=%s\n" % (result, outcome.get("file") or "-", tone.TONE_POINTER_ID))
     if outcome.get("message"):
         sys.stdout.write("note=%s\n" % outcome["message"])
     if outcome.get("tracked"):
@@ -37,7 +37,7 @@ def _run(args, home_dir: str) -> int:
     cfg = config.load_config(home_dir)
     if args.install_pointer:
         return _report_install(tone.install_pointer(home_dir, cfg, os.path.expanduser("~"), args.confirm_tracked,
-                                                    args.dry_run))
+                                                    args.dry_run), args.dry_run)
     if args.model_file:
         profile = tone.set_model(home_dir, os.environ, cfg, args.model_file)
     else:

@@ -78,6 +78,15 @@ class GlobalApplyTest(ApplyCliCase):
         self.assertEqual((row["action"], row["id"], row["result"], row["tracked"]), ("apply", A, "written", False))
         self.assertIn(" n=5 high ", row["line"])
 
+    def test_dry_run_reports_would_write_and_leaves_file(self):
+        before = self.read(self.claude_md)
+        result = self.applied_global(T, "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        first = self.out(result).splitlines()[0]
+        self.assertEqual(first, "result=would-write file=%s" % self.claude_md)
+        self.assertNotIn("result=written", self.out(result))
+        self.assertEqual(self.read(self.claude_md), before)
+
     def test_global_apply_without_pack_minimal_accepted_entry(self):
         result = self.applied_global(T)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -115,7 +124,7 @@ class GlobalApplyTest(ApplyCliCase):
     def test_dry_run_prints_diff_no_write(self):
         result = self.applied_global(A, "--dry-run")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("result=written", self.out(result))
+        self.assertIn("result=would-write", self.out(result))
         self.assertIn("+- " + TEXT, self.out(result))
         self.assertEqual(self.read(self.claude_md), "# Mine\n")
         self.assertEqual(ledger.read_applied(self.home), [])
@@ -152,7 +161,7 @@ class GlobalApplyTest(ApplyCliCase):
         self.write_pack([{"id": A, "kind": "correction", "topic": "t", "evidence_ids": [], "repos": []}], {})
         result = self.applied_global(A, "--pack", self.pack, "--dry-run")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("result=written", self.out(result))
+        self.assertIn("result=would-write", self.out(result))
         self.assertIn("+- " + TEXT, self.out(result))
         self.assertEqual(self.read(self.claude_md), "# Mine\n")
         self.assertEqual(ledger.read_applied(self.home), [])

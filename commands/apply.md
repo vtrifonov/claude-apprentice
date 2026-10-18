@@ -14,7 +14,7 @@ Apply, undo or replay apprentice rules.
    "${APPRENTICE_PYTHON:-/usr/bin/python3}" -I -S "<root>/scripts/apply.py" $ARGUMENTS
    ```
 
-3. The script prints one `result=<r> file=<f>` line per rule and file (plus a diff for `--dry-run`). Report it as is. Exit 0 means `written`, `unchanged`, `removed`, or for `--replay` `edited` (the user changed the line; it is left alone) or `moved` (the line sits outside the apprentice section; nothing is added); exit 1 means a `skipped:*` result, which you explain in one sentence; exit 2 means a usage error, whose stderr you quote.
+3. The script prints one `result=<r> file=<f>` line per rule and file (plus a diff for `--dry-run`). Report it as is. Exit 0 means `written`, `unchanged`, `removed` (with `--dry-run`, `would-write` or `would-remove`: nothing was changed), or for `--replay` `edited` (the user changed the line; it is left alone) or `moved` (the line sits outside the apprentice section; nothing is added); exit 1 means a `skipped:*` result, which you explain in one sentence; exit 2 means a usage error, whose stderr you quote.
 
    The sensitive-text check cannot know employer, customer or service names: add them as regexes to `extra_redact_patterns` in `<home>/config.json`.
 
