@@ -1,4 +1,5 @@
 import copy
+import json
 
 from apprentice import cluster, config
 from tests.base import ApprenticeTestCase
@@ -36,7 +37,22 @@ class NormalizeTest(ApprenticeTestCase):
         self.assertEqual(norm("Edit src/app/main.py or notes.md now?"), "edit <path> or <path> now?")
         self.assertEqual(norm("Touch src/app?"), "touch <path>?")
         self.assertEqual(norm("Done at 80% yet?"), "done at yet?")
-        self.assertEqual(norm("Use 2 files, ok?"), "use 2 files ok?")
+        self.assertEqual(norm("Use 2 files, ok?"), "use files ok?")
+
+    def test_normalize_drops_every_digit_run(self):
+        norm = cluster.normalize_stem
+        self.assertEqual(norm("Resume 3 files?"), norm("Resume 5 files?"))
+        self.assertEqual(norm("Resume 3 files?"), "resume files?")
+        self.assertEqual(norm("Resume 12.5% of 40 files?"), "resume of files?")
+        self.assertEqual(cluster.ask_rule_id(("", "h", norm("Resume 3 files?"), "a")),
+                         cluster.ask_rule_id(("", "h", norm("Resume 5 files?"), "a")))
+
+    def test_versions_and_abbreviations_are_not_paths(self):
+        norm = cluster.normalize_stem
+        self.assertEqual(norm("Use v1.2 or 3.5 now?"), "use v or now?")
+        self.assertEqual(norm("Pick one, e.g. opus, now?"), "pick one eg opus now?")
+        self.assertEqual(norm("Is that i.e? ok"), "is that ie?")
+        self.assertEqual(norm("Edit notes.md or /tmp/x now?"), "edit <path> or <path> now?")
 
     def test_normalize_stops_at_first_question_mark_else_120_chars(self):
         self.assertEqual(cluster.normalize_stem("Quick mode? (test-only change: one spec file)"), "quick mode?")
@@ -157,6 +173,59 @@ class ClusterTest(ApprenticeTestCase):
         self.assertEqual(self._clusters([first, other_session])[0]["reversals"], [])
         same_answer = ask_fixtures.ask_event(ts="2030-01-06T10:00:00.000Z", repo=None)
         self.assertEqual(self._clusters([first, same_answer])[0]["reversals"], [])
+
+    def test_reversals_list_only_adjacent_flips(self):
+        answers = [["Fable (Recommended)"], ["No fable (opus)"], ["Fable (Recommended)"], ["No fable (opus)"]]
+        events = [ask_fixtures.ask_event(ts="2030-01-05T10:00:0%d.000Z" % index, answer_labels=labels)
+                  for index, labels in enumerate(answers)]
+        found = self._clusters(events)[0]
+        self.assertEqual([(r["answer_a"], r["answer_b"]) for r in found["reversals"]],
+                         [("fable", "no fable (opus)"), ("no fable (opus)", "fable"),
+                          ("fable", "no fable (opus)")])
+        steady = [ask_fixtures.ask_event(ts="2030-01-05T10:00:0%d.000Z" % index) for index in range(3)]
+        steady.append(ask_fixtures.ask_event(ts="2030-01-05T10:00:09.000Z", answer_labels=["No fable (opus)"]))
+        self.assertEqual(len(self._clusters(steady)[0]["reversals"]), 1)
+
+    def test_rows_carry_recommended_labels_raw(self):
+        found = self._clusters([ask_fixtures.ask_event(),
+                                ask_fixtures.ask_event(option_labels=["Yes", "No"], answer_labels=["Yes"],
+                                                       ts="2030-01-05T10:00:02.000Z")])
+        by_labels = {tuple(row["labels"]): row for found_one in found for row in found_one["rows"]}
+        self.assertEqual(by_labels[("fable",)]["recommended"], ["Fable (Recommended)"])
+        self.assertIsNone(by_labels[("yes",)]["recommended"])
+
+    def test_non_visible_rows_and_headers_leak_nothing(self):
+        marker = "zq" + "leak" + "9"
+        mine = ask_fixtures.ask_event(profile="mine", ts="2030-01-05T10:00:01.000Z", header="Models",
+                                      ticket="XX-123")
+        theirs = ask_fixtures.ask_event(profile="theirs", ts="2030-01-05T10:00:02.000Z",
+                                        header="Model set", free_text="plan " + marker,
+                                        ticket="LK-123", cwd="/home/" + marker + "/code")
+        other = ask_fixtures.ask_event(profile="theirs", ts="2030-01-05T10:00:03.000Z", question="Other " + marker + "?",
+                                       header="Hdr " + marker, free_text="more " + marker, ticket="LK-9",
+                                       cwd="/home/" + marker)
+        found = self._clusters([mine, theirs, other], visible=lambda e: e["profile"] == "mine")
+        by_stem = {item["stem"]: item for item in found}
+        group = by_stem["use fable?"]
+        self.assertEqual(group["raw_headers"], ["Models"])  # the hidden "Model set" spelling is not listed
+        hidden = [row for row in group["rows"] if not row["visible"]][0]
+        self.assertEqual(hidden["ticket"], "LK")
+        self.assertIsNone(hidden["cwd"])
+        self.assertEqual(hidden["repo"], "acme/widgets")
+        visible = [row for row in group["rows"] if row["visible"]][0]
+        self.assertEqual(visible["ticket"], "XX-123")
+        # a cluster that is entirely non-visible: only identity fields may carry the marker
+        other_cluster = by_stem[cluster.normalize_stem("Other " + marker + "?")]
+        self.assertEqual(other_cluster["raw_headers"], [])
+        stripped = {key: value for key, value in other_cluster.items() if key not in ("key", "stem", "header", "id")}
+        self.assertNotIn(marker, json.dumps(stripped, default=sorted))
+        self.assertNotIn(marker, json.dumps({k: v for k, v in group.items() if k not in ("key",)}, default=sorted))
+
+    def test_visible_row_free_text_is_outbound_masked(self):
+        address = "bob" + "@" + "example" + ".test"
+        event = ask_fixtures.ask_event(free_text="mail %s now" % address)
+        row = self._clusters([event])[0]["rows"][0]
+        self.assertEqual(row["free_text"], "mail <email> now")
 
     def test_reversal_same_repo(self):
         first = ask_fixtures.ask_event(ts="2030-01-05T10:00:00.000Z", session_id="sess-1")

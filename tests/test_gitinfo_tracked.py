@@ -120,5 +120,18 @@ class SkillScopeTest(ApprenticeTestCase):
         self.assertIs(scope.is_readonly_skill(self.tree["tracked"]), False)
 
 
+class FixtureAndDocTest(unittest.TestCase):
+    def test_fakes_are_posix_sh_scripts(self):
+        for path in (_FAKE_GH, _FAKE_GIT):
+            with open(path, "r", encoding="utf-8") as fh:
+                self.assertEqual(fh.readline().strip(), "#!/bin/sh", path)
+            self.assertTrue(os.access(path, os.X_OK), path)
+
+    def test_inspect_target_documents_tracked_meaning(self):
+        doc = apply.inspect_target.__doc__ or ""
+        self.assertIn("tracked", doc)
+        self.assertIn("is_tracked", doc)
+
+
 if __name__ == "__main__":
     unittest.main()

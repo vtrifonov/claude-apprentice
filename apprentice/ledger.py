@@ -11,6 +11,14 @@ if False:  # annotations only
 DECISIONS = ("accepted", "rejected", "snoozed", "undone", "accept_failed")
 STATUSES = ("shown", "accepted", "rejected", "snoozed", "edited", "accept_failed", "undone")
 SEED_TOKEN_CAP = 64
+# Only these decided statuses hide a candidate from the next run. `accept_failed` stays eligible (the apply did
+# not land) and `undone` is recorded but no longer applied; both appear in current_states()/totals() as decided
+# without hiding anything.
+HIDING = frozenset(["rejected", "snoozed", "accepted"])
+
+
+def is_hiding(status: Optional[str]) -> bool:
+    return status in HIDING
 
 
 def _ledger_file(home_dir: str, name: str) -> str:
@@ -183,6 +191,16 @@ def _union(*lists) -> List[str]:
     return seen
 
 
+def _stored_pack(home_dir: str, pack_json_path: str) -> str:
+    """The rendered pack path, relative to the data root when it lies under it."""
+    path = pack_json_path[:-len(".json")] + ".md" if pack_json_path.endswith(".json") else pack_json_path
+    root = os.path.realpath(home_dir)
+    real = os.path.realpath(path)
+    if real == root or real.startswith(root + os.sep):
+        return os.path.relpath(real, root)
+    return path
+
+
 def record_decision(home_dir: str, pack_json_path: Optional[str], rule_id: str, status: str,
                     text: Optional[str] = None, scope=None, target=None, user_edit=None, reason=None,
                     n_at_decision=None, merged_ids: Optional[List[str]] = None,
@@ -191,8 +209,13 @@ def record_decision(home_dir: str, pack_json_path: Optional[str], rule_id: str, 
         raise ValueError("unknown status: %s" % status)
     decided_at = config.utc_now_iso() if status in DECISIONS else None
     if pack_json_path is None:
-        entry = {"id": rule_id, "status": status, "text": text, "scope": scope, "target": target,
-                 "profile": profile, "kind": None, "tokens": None, "decided_at": decided_at}
+        entry = {
+            "id": rule_id, "status": status, "text": text, "scope": scope, "target": target,
+            "evidence_ids": None, "merged_ids": list(merged_ids) if merged_ids else None, "kind": None,
+            "cluster_key": None, "topic": None, "tokens": None, "profile": profile, "group": None,
+            "n_at_decision": n_at_decision, "decided_at": decided_at, "user_edit": user_edit, "pack": None,
+            "reason": reason,
+        }
         append_proposal(home_dir, entry)
         return entry
     pack = load_pack(pack_json_path)
@@ -214,7 +237,7 @@ def record_decision(home_dir: str, pack_json_path: Optional[str], rule_id: str, 
     entry = {
         "id": rule_id,
         "status": status,
-        "text": text if text is not None else cand.get("summary"),
+        "text": text,
         "scope": scope if scope is not None else cand.get("scope"),
         "target": target if target is not None else cand.get("target"),
         "evidence_ids": evidence,
@@ -228,7 +251,7 @@ def record_decision(home_dir: str, pack_json_path: Optional[str], rule_id: str, 
         "n_at_decision": n_at_decision if n_at_decision is not None else own.get("n"),
         "decided_at": decided_at,
         "user_edit": user_edit,
-        "pack": (pack_json_path[:-len(".json")] + ".md") if pack_json_path.endswith(".json") else pack_json_path,
+        "pack": _stored_pack(home_dir, pack_json_path),
         "reason": reason,
     }
     append_proposal(home_dir, entry)

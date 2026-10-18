@@ -51,6 +51,12 @@ def _excluded(root: str, path: str) -> Optional[bool]:
 
 
 def inspect_target(path: str, cfg: dict, timeout: float = 5.0) -> dict:
+    """Describe where a target file lives.
+
+    `tracked` here means the file sits inside a git work tree (a `.git` is found above its realpath), the
+    "tracked in <root>" sense used for skills. It is not `gitinfo.is_tracked`, which asks whether a file is in
+    the index and is what decides CLAUDE.local.md. Public-mirror skills are also reported as tracked.
+    """
     real = os.path.realpath(path)
     root = _find_repo_root(real)
     info = {"tracked": False, "root": None, "remote": None, "visibility": None,

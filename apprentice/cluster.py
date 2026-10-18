@@ -6,6 +6,7 @@ import re
 from collections import Counter
 
 from apprentice import config, lexicon
+from apprentice.departures import ticket_prefix
 from apprentice.scrub import TICKET_RE, mask_outbound
 
 if False:  # annotations only
@@ -29,17 +30,24 @@ _BUDGET_RE = re.compile(r"(?:Budget:|Weekly\s+budget|Weekly\s+usage|Usage:).*?(?
                         re.IGNORECASE | re.DOTALL)
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?(?:\s*[+-]\d{2}:?\d{2}|Z)?")
 _QUOTED_RE = re.compile(r"\"[^\"]*\"|(?<!\w)'[^']*'|`[^`]*`")
-_PCT_RE = re.compile(r"\d+(?:\.\d+)?%")
+_NUMBER_RE = re.compile(r"\d+(?:\.\d+)?%?")
 _TOKEN_RE = re.compile(r"\S+")
-_EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,5}$")
+_EXT_RE = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,4}$")
+_ABBREV_RE = re.compile(r"^(?:[A-Za-z]\.)+[A-Za-z]$")
 _PUNCT_RE = re.compile(r"[^\w\s?<>]")
 _TOKEN_TAIL = "?.,;:!)"
+
+
+def _is_path(core: str) -> bool:
+    if "/" in core:
+        return True
+    return core[0].isalpha() and not _ABBREV_RE.match(core) and bool(_EXT_RE.search(core))
 
 
 def _path_token(match) -> str:
     token = match.group(0)
     core = token.rstrip(_TOKEN_TAIL)
-    if core and ("/" in core or _EXT_RE.search(core)):
+    if core and _is_path(core):
         return "<path>" + token[len(core):]
     return token
 
@@ -53,7 +61,7 @@ def normalize_stem(question: str) -> str:
     text = _QUOTED_RE.sub("<q>", text)
     text = TICKET_RE.sub("<ticket>", text)
     text = _TOKEN_RE.sub(_path_token, text)
-    text = _PCT_RE.sub("", text)
+    text = _NUMBER_RE.sub("", text)
     text = _PUNCT_RE.sub("", text.lower())
     return " ".join(text.split())
 
@@ -94,8 +102,14 @@ def _ts_key(ts) -> Tuple[float, str]:
     return (config.ts_epoch(ts) or 0.0, ts or "")
 
 
-def _row(event: dict, answer: Optional[dict], is_visible: bool) -> dict:
-    answer = answer or {}
+def _recommended_labels(question: dict) -> Optional[List[str]]:
+    found = [opt.get("label") or "" for opt in question.get("options") or []
+             if opt.get("recommended") or _RECOMMENDED in (opt.get("label") or "")]
+    return found or None
+
+
+def _row(event: dict, question: dict, is_visible: bool) -> dict:
+    answer = question.get("answer") or {}
     free_text = answer.get("free_text")
     return {
         "event_id": event.get("id"),
@@ -104,17 +118,18 @@ def _row(event: dict, answer: Optional[dict], is_visible: bool) -> dict:
         "profile": event.get("profile"),
         "visible": is_visible,
         "labels": sorted(_label_name(label) for label in answer.get("labels") or []),
-        "free_text": free_text if is_visible else None,
+        "free_text": mask_outbound(free_text) if is_visible and free_text else None,
         "is_other": bool(answer.get("is_other")),
         "followed_recommended": answer.get("followed_recommended"),
+        "recommended": _recommended_labels(question),
         "repo": event.get("repo"),
-        "ticket": event.get("ticket"),
+        "ticket": event.get("ticket") if is_visible else ticket_prefix(event.get("ticket")),
         "numbers": event.get("numbers") or {},
         "risk_words": event.get("risk_words") or [],
         "skill_hint": event.get("skill_hint"),
         "weekday": event.get("weekday"),
         "hour_local": event.get("hour_local"),
-        "cwd": event.get("cwd"),
+        "cwd": event.get("cwd") if is_visible else None,
         "reset_at": event.get("reset_at"),
         "numbers_other": event.get("numbers_other") or [],
         "risk_words_negated": event.get("risk_words_negated") or [],
@@ -129,17 +144,14 @@ def _find_reversals(rows: List[dict]) -> List[dict]:
             answered.append((epoch, row))
     answered.sort(key=lambda pair: pair[0])
     found = []
-    for index, (epoch_a, row_a) in enumerate(answered):
-        for epoch_b, row_b in answered[index + 1:]:
-            if epoch_b - epoch_a > REVERSAL_WINDOW_S:
-                break
-            if row_a["_answer"] == row_b["_answer"]:
-                continue
-            same_session = bool(row_a["session_id"]) and row_a["session_id"] == row_b["session_id"]
-            same_repo = bool(row_a["repo"]) and row_a["repo"] == row_b["repo"]
-            if same_session or same_repo:
-                found.append({"ts_a": row_a["ts"], "answer_a": row_a["_answer"],
-                              "ts_b": row_b["ts"], "answer_b": row_b["_answer"]})
+    for (epoch_a, row_a), (epoch_b, row_b) in zip(answered, answered[1:]):
+        if epoch_b - epoch_a > REVERSAL_WINDOW_S or row_a["_answer"] == row_b["_answer"]:
+            continue
+        same_session = bool(row_a["session_id"]) and row_a["session_id"] == row_b["session_id"]
+        same_repo = bool(row_a["repo"]) and row_a["repo"] == row_b["repo"]
+        if same_session or same_repo:
+            found.append({"ts_a": row_a["ts"], "answer_a": row_a["_answer"],
+                          "ts_b": row_b["ts"], "answer_b": row_b["_answer"]})
     return found
 
 
@@ -197,7 +209,7 @@ def build_ask_clusters(events: List[dict], cfg: dict, visible: Callable[[dict], 
                     "free_texts": [], "withheld_texts": 0, "raw_headers": set(), "questions": [],
                 }
             answer = question.get("answer")
-            row = _row(event, answer, is_visible)
+            row = _row(event, question, is_visible)
             row["_answer"] = _answer_string(answer)
             acc["rows"].append(row)
             if row["_answer"] is not None:
@@ -209,9 +221,9 @@ def build_ask_clusters(events: List[dict], cfg: dict, visible: Callable[[dict], 
                     acc["free_texts"].append(answer["free_text"])
                 else:
                     acc["withheld_texts"] += 1
-            if question.get("header"):
-                acc["raw_headers"].add(question["header"])
             if is_visible:
+                if question.get("header"):
+                    acc["raw_headers"].add(question["header"])
                 acc["questions"].append((event.get("ts"), question.get("question") or ""))
     clusters = [_finish(acc) for acc in groups.values()]
     clusters.sort(key=lambda found: (-found["n"], found["id"]))
@@ -247,21 +259,36 @@ def _recent_first(pair_or_event_ts, event_id) -> Tuple[Tuple[float, str], str]:
     return (_ts_key(pair_or_event_ts), event_id or "")
 
 
+_WITHHELD_EVENT_KEYS = ("id", "kind", "ts", "session_id", "profile", "repo", "tags", "after_interrupt",
+                        "after_rejected_ask", "strong_marker")
+
+
+def _withheld_event(event: dict) -> dict:
+    """A non-visible prompt keeps its signal flags and ids, never its text, anchor, ticket, cwd or branch."""
+    kept = {key: event.get(key) for key in _WITHHELD_EVENT_KEYS if key in event}
+    kept["ticket"] = ticket_prefix(event.get("ticket"))
+    return kept
+
+
 def select_pairs(events: List[dict], limit: int = PAIR_LIMIT,
                  visible: Optional[Callable[[dict], bool]] = None) -> List[dict]:
     """Correction candidates: prompts with a correction signal and a previous-assistant anchor, most recent first."""
     chosen = [event for event in events
               if event.get("kind") == "prompt" and event.get("prev_assistant") and _has_signal(event)]
     chosen.sort(key=lambda event: _recent_first(event.get("ts"), event.get("id")), reverse=True)
-    return [{
-        "event": event,
-        "tokens": content_tokens(event.get("text")),
-        "visible": True if visible is None else bool(visible(event)),
-        "profile": event.get("profile"),
-        "ts": event.get("ts"),
-        "session_id": event.get("session_id"),
-        "repo": event.get("repo"),
-    } for event in chosen[:limit]]
+    out = []
+    for event in chosen[:limit]:
+        is_visible = True if visible is None else bool(visible(event))
+        out.append({
+            "event": event if is_visible else _withheld_event(event),
+            "tokens": content_tokens(event.get("text")),
+            "visible": is_visible,
+            "profile": event.get("profile"),
+            "ts": event.get("ts"),
+            "session_id": event.get("session_id"),
+            "repo": event.get("repo"),
+        })
+    return out
 
 
 def _correction_group(seed_pair: dict, topic: Optional[str]) -> dict:

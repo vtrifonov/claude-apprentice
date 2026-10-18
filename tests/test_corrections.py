@@ -1,4 +1,5 @@
 import hashlib
+import json
 
 from apprentice import cluster
 from tests.base import ApprenticeTestCase
@@ -106,6 +107,36 @@ class GroupTest(ApprenticeTestCase):
         self.assertEqual(group["strong_marker_pairs"], 2)
         self.assertEqual(group["sessions"], ["sess-1", "sess-2"])
         self.assertEqual(group["repos"], ["acme/gadgets", "acme/widgets"])
+
+
+class LeakTest(ApprenticeTestCase):
+    def test_non_visible_pairs_carry_no_verbatim_text(self):
+        marker = "zq" + "leak" + "9"
+        mine = _prompt("e1", "alpha bravo cobalt", 1)
+        theirs = _prompt("e2", "alpha bravo cobalt %s" % marker, 2, prev_assistant="said %s here" % marker,
+                         ticket="LK-123", cwd="/home/%s/code" % marker, branch="feat/" + marker)
+        pairs = cluster.select_pairs([mine, theirs], visible=lambda event: event["id"] != "e2")
+        groups = cluster.group_pairs(pairs, {})
+        ask = ask_fixtures.ask_event(id="a1", ts=_ts(0, 0))
+        clusters = cluster.build_ask_clusters([ask], dict(cluster.config.DEFAULTS), lambda event: True)
+        linked = cluster.link_groups_to_clusters(groups, clusters, [mine, theirs, ask])
+
+        def strip_tokens(value):
+            if isinstance(value, dict):
+                return {k: strip_tokens(v) for k, v in value.items() if k != "tokens"}
+            if isinstance(value, list):
+                return [strip_tokens(v) for v in value]
+            return value
+
+        hidden = [pair for pair in pairs if not pair["visible"]][0]
+        self.assertEqual(hidden["event"]["id"], "e2")
+        self.assertNotIn(marker, json.dumps(strip_tokens(hidden)))
+        self.assertNotIn(marker, json.dumps(strip_tokens(groups), default=sorted))
+        self.assertNotIn(marker, json.dumps(linked))
+        visible = [pair for pair in pairs if pair["visible"]][0]
+        self.assertEqual(visible["event"]["text"], "alpha bravo cobalt")
+        self.assertEqual(hidden["tokens"], cluster.content_tokens("alpha bravo cobalt " + marker))
+        self.assertEqual(hidden["event"]["strong_marker"], False)
 
 
 class LinkTest(ApprenticeTestCase):

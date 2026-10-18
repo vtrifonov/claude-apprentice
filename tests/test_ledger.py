@@ -88,6 +88,13 @@ class LedgerFileTest(ApprenticeTestCase):
         ]
         self.assertEqual(ledger.totals(rows), {"rejected": 1, "accepted": 1, "undone": 1})
 
+    def test_is_hiding_only_for_rejected_snoozed_accepted(self):
+        self.assertEqual(ledger.HIDING, {"rejected", "snoozed", "accepted"})
+        for status in ("rejected", "snoozed", "accepted"):
+            self.assertTrue(ledger.is_hiding(status), status)
+        for status in ("accept_failed", "undone", "shown", "edited", None):
+            self.assertFalse(ledger.is_hiding(status), status)
+
     def test_private_sidecar_roundtrip_outside_review(self):
         pack = os.path.join(self.home, "review", "2026-10-18-1.json")
         path = ledger.private_path(self.home, pack)
@@ -139,8 +146,13 @@ class ScriptTest(ApprenticeTestCase):
         self.assertEqual(entry["n_at_decision"], 7)
         self.assertTrue(entry["decided_at"])
         self.assertEqual(entry["profile"], "default")
-        self.assertEqual(entry["pack"], self.pack[:-len(".json")] + ".md")
-        self.assertEqual(entry["text"], "Use tabs")
+        self.assertEqual(entry["pack"], os.path.join("review", "2026-10-18-1.md"))
+        self.assertIsNone(entry["text"])  # no summary fallback: summary describes the rule, it is not its text
+
+    def test_pack_outside_data_root_stored_as_given(self):
+        outside = os.path.join(self.fake_home, "elsewhere", "p.json")
+        entry = ledger.record_decision(self.home, outside, "A", "rejected")
+        self.assertEqual(entry["pack"], os.path.join(self.fake_home, "elsewhere", "p.md"))
 
     def test_script_record_ask_carries_cluster_key_and_null_tokens(self):
         self.write_pack([{"id": "Q", "kind": "ask", "topic": "mode", "evidence_ids": ["e1"]}])
@@ -191,6 +203,12 @@ class ScriptTest(ApprenticeTestCase):
         self.assertIsNone(entry["kind"])
         self.assertIsNone(entry["tokens"])
         self.assertEqual(ledger.read_proposals(self.home)[0]["id"], "tone")
+        with_pack = ledger.record_decision(self.home, self.pack, "tone2", "accepted")
+        for key in ("evidence_ids", "merged_ids", "cluster_key", "topic", "group", "n_at_decision", "pack"):
+            self.assertIn(key, entry)
+        self.assertEqual(set(entry), set(with_pack))
+        self.assertIsNone(entry["pack"])
+        self.assertIsNone(entry["group"])
 
     def test_script_text_file_outside_tmp_rejected(self):
         self.write_pack([{"id": "A", "kind": "correction", "topic": "a", "evidence_ids": []}])

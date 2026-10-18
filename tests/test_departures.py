@@ -142,6 +142,55 @@ class AnalyzeTest(ApprenticeTestCase):
         self.assertEqual(found[0]["repo"], "acme/widgets")
 
 
+class RecommendedPassTest(ApprenticeTestCase):
+    def test_recommended_pass_runs_when_nobody_followed_it(self):
+        rec = ["A (Recommended)"]
+        rows = [_crow("2030-01-0%dT04:00:00Z" % day, "b", followed_recommended=False, recommended=rec,
+                      numbers={"used_pct": 10.0 + day}) for day in range(1, 5)]
+        rows += [_crow("2030-01-0%dT04:00:00Z" % day, "a", followed_recommended=True, recommended=rec,
+                       numbers={"used_pct": 90.0 + day}) for day in range(5, 7)]
+        cl = _cluster(rows)
+        self.assertEqual(departures.recommended_answer(cl), "a")
+        found = departures.analyze(cl)
+        self.assertEqual(found["recommended"]["feature"], "used_pct")
+        self.assertEqual(found["recommended"]["dep_answer"], "b")
+        self.assertEqual(found["recommended"]["maj_answer"], "a")
+        never = _cluster([_crow("2030-01-0%dT04:00:00Z" % day, "b", followed_recommended=False, recommended=rec)
+                          for day in range(1, 6)])
+        self.assertEqual(departures.recommended_answer(never), "a")
+        self.assertEqual(len(departures.analyze(never)["departure_rows"]), 5)
+
+    def test_rows_without_recommended_option_are_skipped(self):
+        rec = ["A (Recommended)"]
+        rows = [_crow("2030-01-0%dT04:00:00Z" % day, "a", recommended=rec) for day in range(1, 4)]
+        rows += [_crow("2030-01-0%dT04:00:00Z" % day, "b", recommended=None) for day in range(4, 9)]
+        found = departures.analyze(_cluster(rows))
+        self.assertIsNone(found["recommended"])
+
+    def test_recommended_mark_moving_uses_row_specific_set(self):
+        rows = [_crow("2030-01-0%dT04:00:00Z" % day, "a", recommended=["A (Recommended)"],
+                      numbers={"used_pct": 10.0 + day}) for day in range(1, 5)]
+        rows += [_crow("2030-01-0%dT04:00:00Z" % day, "b", recommended=["B (Recommended)"],
+                       numbers={"used_pct": 90.0 + day}) for day in range(5, 9)]
+        found = departures.analyze(_cluster(rows))
+        self.assertIsNone(found["recommended"])  # every row followed its own recommendation
+
+
+class WeekdayTest(ApprenticeTestCase):
+    def test_weekday_is_categorical(self):
+        rows = [_crow("2030-01-0%dT04:00:00Z" % day, "a", weekday=day % 5) for day in range(1, 7)]
+        rows += [_crow("2030-01-1%dT04:00:00Z" % day, "b", weekday=5 + day % 2) for day in range(3)]
+        found = departures.analyze(_cluster(rows))
+        self.assertEqual(found["majority"]["op"], "==")
+        self.assertEqual(found["majority"]["feature"], "weekday")
+        self.assertIn(found["majority"]["value"], ("5", "6"))
+        self.assertTrue(departures.sentence(found["majority"]).startswith("weekday = "))
+        pinned = [_crow("2030-01-0%dT04:00:00Z" % day, "a", weekday=2) for day in range(1, 7)]
+        pinned += [_crow("2030-01-1%dT04:00:00Z" % day, "b", weekday=5) for day in range(3)]
+        self.assertTrue(departures.sentence(departures.analyze(_cluster(pinned))["majority"])
+                        .startswith('weekday = 5 → "b" 3 of 3'))
+
+
 class FeatureRowsTest(ApprenticeTestCase):
     def test_feature_rows_shape(self):
         rows = [
@@ -176,7 +225,7 @@ class FeatureRowsTest(ApprenticeTestCase):
     def test_majority_and_recommended_answer(self):
         rows = [dict(answer="b"), dict(answer="a"), dict(answer="a"), dict(answer="b")]
         self.assertEqual(departures.majority_answer(rows), "a")  # ties sort alphabetically
-        crows = [_crow("2030-01-0%dT04:00:00Z" % day, "a", followed_recommended=True) for day in range(1, 3)]
-        crows.append(_crow("2030-01-05T04:00:00Z", "b", followed_recommended=False))
+        crows = [_crow("2030-01-0%dT04:00:00Z" % day, "a", recommended=["A (Recommended)"]) for day in range(1, 3)]
+        crows.append(_crow("2030-01-05T04:00:00Z", "b", recommended=["A (Recommended)"]))
         self.assertEqual(departures.recommended_answer(_cluster(crows)), "a")
         self.assertIsNone(departures.recommended_answer(_cluster([_crow("2030-01-01T04:00:00Z", "a")])))

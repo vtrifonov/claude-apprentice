@@ -13,8 +13,9 @@ MIN_PURITY = 0.8
 MIN_SIDE = 2
 OTHER = "other"
 _META = frozenset(["answer", "visible", "ts", "numbers", "numbers_other", "reset_at", "risk_words_negated",
-                   "ticket"])
-_PREFIX_RE = re.compile(r"^([A-Za-z]+)-")
+                   "ticket", "recommended"])
+_PREFIX_RE = re.compile(r"^([A-Za-z]+)(?:-|$)")
+_RECOMMENDED = "(Recommended)"
 _SYMBOLS = {">=": "≥", "<": "<", "==": "="}
 
 
@@ -32,9 +33,15 @@ def _is_number(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def _ticket_prefix(ticket: Optional[str]) -> Optional[str]:
+def ticket_prefix(ticket: Optional[str]) -> Optional[str]:
+    """`XX` from `XX-123`; a bare prefix (already cut) maps to itself."""
     match = _PREFIX_RE.match(ticket or "")
     return match.group(1) if match else None
+
+
+def _recommended_string(labels: Optional[List[str]]) -> Optional[str]:
+    names = sorted(label.replace(_RECOMMENDED, "").strip().lower() for label in labels or [])
+    return "|".join(names) if names else None
 
 
 def _row_answer(row: dict) -> Optional[str]:
@@ -42,6 +49,11 @@ def _row_answer(row: dict) -> Optional[str]:
         return OTHER
     labels = row.get("labels") or []
     return "|".join(labels) if labels else None
+
+
+def _weekday(value):
+    """Weekday is categorical (equality only), so a number becomes its string."""
+    return str(int(value)) if _is_number(value) else value
 
 
 def feature_rows(cluster: dict) -> List[dict]:
@@ -60,9 +72,9 @@ def feature_rows(cluster: dict) -> List[dict]:
         hour = row.get("hour_local")
         extras = {
             "repo": row.get("repo"),
-            "ticket_prefix": _ticket_prefix(row.get("ticket")),
+            "ticket_prefix": ticket_prefix(row.get("ticket")),
             "skill_hint": row.get("skill_hint"),
-            "weekday": row.get("weekday"),
+            "weekday": _weekday(row.get("weekday")),
             "hour_band": hour_band(hour) if _is_number(hour) else None,
         }
         features.update({key: value for key, value in extras.items() if value is not None})
@@ -78,6 +90,7 @@ def feature_rows(cluster: dict) -> List[dict]:
             "reset_at": row.get("reset_at"),
             "risk_words_negated": row.get("risk_words_negated") or [],
             "ticket": row.get("ticket"),
+            "recommended": _recommended_string(row.get("recommended")),
         })
         out.append(features)
     return out
@@ -95,8 +108,9 @@ def majority_answer(rows: List[dict]) -> str:
 
 
 def recommended_answer(cluster: dict) -> Optional[str]:
-    followed = [_row_answer(row) for row in cluster.get("rows") or [] if row.get("followed_recommended")]
-    return _most_common([answer for answer in followed if answer is not None])
+    """The recommended label set that is most common across rows, as an answer string."""
+    sets = [_recommended_string(row.get("recommended")) for row in cluster.get("rows") or []]
+    return _most_common([found for found in sets if found is not None])
 
 
 def _candidates(rows: List[dict]):
@@ -153,7 +167,7 @@ def _departure_row(row: dict) -> dict:
     return {
         "ts": row.get("ts"),
         "repo": row.get("repo"),
-        "ticket": ticket if row.get("visible") else _ticket_prefix(ticket),
+        "ticket": ticket if row.get("visible") else ticket_prefix(ticket),
         "numbers": row.get("numbers"),
         "answer": row.get("answer"),
         "reset_at": row.get("reset_at"),
@@ -171,11 +185,11 @@ def analyze(cluster: dict) -> dict:
     if len(by_majority) >= MIN_DEPARTURES:
         result["majority"] = find_split(rows, lambda row: row["answer"] != majority)
         result["departure_rows"] = [_departure_row(row) for row in by_majority]
-    recommended = recommended_answer(cluster)
-    if recommended is not None:
-        by_recommended = [row for row in rows if row["answer"] != recommended]
+    if recommended_answer(cluster) is not None:
+        with_rec = [row for row in rows if row.get("recommended") is not None]
+        by_recommended = [row for row in with_rec if row["answer"] != row["recommended"]]
         if len(by_recommended) >= MIN_DEPARTURES:
-            result["recommended"] = find_split(rows, lambda row: row["answer"] != recommended)
+            result["recommended"] = find_split(with_rec, lambda row: row["answer"] != row["recommended"])
             if not result["departure_rows"]:
                 result["departure_rows"] = [_departure_row(row) for row in by_recommended]
     return result
