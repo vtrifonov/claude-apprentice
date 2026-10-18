@@ -485,9 +485,10 @@ def _apply_candidate(args, home: str, cfg: dict, real_home: str, merged_ids: Opt
     if error:
         return _outcome(error)
     info = inspect_target(path, cfg)
-    if info["tracked"] and not args.confirm_tracked:
+    # A dry run writes nothing, and its diff is what the user must see before confirming a tracked target.
+    if info["tracked"] and not args.confirm_tracked and not args.dry_run:
         return _outcome("skipped:git-tracked", path, info)
-    if info["tracked"] and not args.pack:
+    if info["tracked"] and not args.pack and not args.dry_run:
         return _outcome("skipped:no-pack", path, info)
     real = os.path.realpath(path)
     if os.path.basename(real) == "CLAUDE.md" and info["root"] is not None:
@@ -504,7 +505,7 @@ def _apply_candidate(args, home: str, cfg: dict, real_home: str, merged_ids: Opt
         parsed = split_rule_line(out["line"])
         ledger.record_decision(home, args.pack, args.id, "accepted", text=parsed[0] if parsed else None,
                                scope=args.scope, target=path, merged_ids=merged_ids,
-                               profile=config.current_profile(os.environ))
+                               profile=config.current_profile(os.environ), cfg=cfg)
     return _outcome(out["result"], path, info, out)
 
 
@@ -573,7 +574,7 @@ def apply_repo(target: str, repo: str, rule_id: str, text: str, n: int, band: st
     parsed = split_rule_line(outcome["line"])
     ledger.record_decision(home, pack, rule_id, "accepted", text=parsed[0] if parsed else None,
                            scope="repo", target=local, merged_ids=merged_ids,
-                           profile=config.current_profile(os.environ))
+                           profile=config.current_profile(os.environ), cfg=cfg)
     return outcome
 
 

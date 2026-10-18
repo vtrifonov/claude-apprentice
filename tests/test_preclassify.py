@@ -110,6 +110,25 @@ class BatchTest(_Base):
         self.assertEqual(cached["evt-001"]["topic"], "naming-style")
         self.assertEqual(summary["cached"], 1)
 
+    def test_topic_and_sketch_length_caps(self):
+        good = {"id": "evt-001", "is_correction": True, "topic": "One Two Three Four Five Six",
+                "rule_sketch": "keep names short", "confidence": 0.7}
+        items = [
+            good,
+            dict(good, id="evt-002", topic="x" * 5000),
+            dict(good, id="evt-003", topic="!!! ???"),
+            dict(good, id="evt-004", topic=""),
+            dict(good, id="evt-005", rule_sketch="y" * 201),
+            dict(good, id="evt-006", rule_sketch="z" * 200),
+        ]
+        env = dict(self.env, FAKE_CLAUDE_MODE="raw", FAKE_CLAUDE_RESULT=json.dumps(items))
+        self.run_batches([_prompt(i) for i in range(1, 7)], env=env)
+        cached = preclassify.read_cache(self.home)
+        self.assertEqual(sorted(cached), ["evt-001", "evt-002", "evt-006"])
+        self.assertEqual(cached["evt-001"]["topic"], "one-two-three-four")
+        self.assertEqual(cached["evt-002"]["topic"], "x" * 60)
+        self.assertEqual(cached["evt-006"]["rule_sketch"], "z" * 200)
+
 
 class FailureTest(_Base):
     def test_each_failure_mode_skips_batch(self):
@@ -127,6 +146,27 @@ class FailureTest(_Base):
         summary = self.run_batches([_prompt(1)], env=env)
         self.assertEqual((summary["cached"], summary["skipped"], len(self.logged)), (0, 1, 1))
         self.assertEqual(preclassify.read_cache(self.home), {})
+
+    def test_lone_surrogate_in_text_does_not_abort(self):
+        summary = self.run_batches([_prompt(1, text="no, use helper \ud800 one")])
+        self.assertEqual(summary["cached"], 1)
+        self.assertIn("helper ? one", self.calls()[0]["stdin"])
+
+    def test_non_utf8_child_stdout_is_decoded_with_replacement(self):
+        env = dict(self.env, FAKE_CLAUDE_MODE="badutf8")
+        summary = self.run_batches([_prompt(1)], env=env)
+        self.assertEqual(summary["cached"], 1)
+        self.assertEqual(preclassify.read_cache(self.home)["evt-001"]["rule_sketch"], "prefer the � helper")
+
+    def test_any_child_exception_counts_as_failed_batch(self):
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("unexpected")
+        original = preclassify.subprocess.run
+        preclassify.subprocess.run = boom
+        self.addCleanup(setattr, preclassify.subprocess, "run", original)
+        summary = self.run_batches([_prompt(1)])
+        self.assertEqual((summary["cached"], summary["skipped"], len(self.logged)), (0, 1, 1))
+        self.assertIn("RuntimeError", self.logged[0])
 
     def test_limit_envelope_with_exit_zero_still_fails(self):
         env = dict(self.env, FAKE_CLAUDE_MODE="iserror")
@@ -197,7 +237,8 @@ class PayloadTest(_Base):
         self.assertEqual(call["env"]["APPRENTICE_DISABLE"], "1")
         self.assertNotIn("CLAUDE_CODE_ENTRYPOINT", call["env"])
         self.assertEqual(call["argv"][1:], ["-p", "--model", "haiku", "--output-format", "json",
-                                            "--no-session-persistence"])
+                                            "--no-session-persistence", "--safe-mode", "--tools", ""])
+        self.assertEqual(os.path.realpath(call["cwd"]), os.path.realpath(os.path.join(self.home, "state")))
 
     def test_marker_first_line(self):
         self.run_batches([_prompt(1)])

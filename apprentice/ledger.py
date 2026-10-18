@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 
-from apprentice import SCHEMA_VERSION, config, events
+from apprentice import SCHEMA_VERSION, config, events, scrub
 
 if False:  # annotations only
     from typing import Dict, List, Optional, Set
@@ -19,6 +19,19 @@ HIDING = frozenset(["rejected", "snoozed", "accepted"])
 
 def is_hiding(status: Optional[str]) -> bool:
     return status in HIDING
+
+
+# Fields copied from the private sidecar (or keying its non-visible text); never printed to a session.
+PRIVATE_FIELDS = frozenset(["tokens", "cluster_key", "evidence_ids"])
+
+
+def strip_private(value):
+    """A copy of `value` with PRIVATE_FIELDS removed from every dict at any nesting level."""
+    if isinstance(value, dict):
+        return {k: strip_private(v) for k, v in value.items() if k not in PRIVATE_FIELDS}
+    if isinstance(value, list):
+        return [strip_private(v) for v in value]
+    return value
 
 
 def _ledger_file(home_dir: str, name: str) -> str:
@@ -204,9 +217,12 @@ def _stored_pack(home_dir: str, pack_json_path: str) -> str:
 def record_decision(home_dir: str, pack_json_path: Optional[str], rule_id: str, status: str,
                     text: Optional[str] = None, scope=None, target=None, user_edit=None, reason=None,
                     n_at_decision=None, merged_ids: Optional[List[str]] = None,
-                    profile: Optional[str] = None) -> dict:
+                    profile: Optional[str] = None, cfg: Optional[dict] = None) -> dict:
     if status not in STATUSES:
         raise ValueError("unknown status: %s" % status)
+    if cfg is None:
+        cfg = config.load_config(home_dir)
+    text, user_edit, reason = (scrub.scrub(v, cfg)[0] for v in (text, user_edit, reason))
     decided_at = config.utc_now_iso() if status in DECISIONS else None
     if pack_json_path is None:
         entry = {

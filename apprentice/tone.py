@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
 import re
 import string
@@ -19,7 +18,7 @@ from collections import Counter
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 from apprentice import cluster, config, distill, events, lexicon
-from apprentice.scrub import mask_outbound, scrub
+from apprentice.scrub import EMAIL_RE, TICKET_RE, UUID_RE, mask_outbound, scrub
 
 PRECISION = 6
 OPENER_LIMIT = 15
@@ -32,8 +31,14 @@ JOINS = (" so ", "->", " and ", " but ")
 SUBORDINATORS = re.compile(r"\b(?:which|although|unless|whether)\b")
 
 _WORD_RE = re.compile(r"[A-Za-z][A-Za-z']*")
+_SEQ_WORD_RE = re.compile(r"[a-z0-9][a-z0-9_'-]*")
 _TYPO_RE = re.compile(r"^[a-z]{4,}$")
 _TYPO_STRIP = string.punctuation + "‘’“”«»…"
+_CODE_START = ("_", ".", "/", "~", "-", "`")
+_CODE_INNER = ("/", "_", "`")
+# emails, UUIDs and ticket keys never enter a list entry (mask_outbound and the ticket scrub would change them)
+_SKIP_RES = (EMAIL_RE, UUID_RE, TICKET_RE)
+_CUT = "\x00"
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 _INNER_SENTENCE_END_RE = re.compile(r"[.!?]\s+\S")
 _YES_RE = re.compile(r"^\W*(?:go|yep|sure|good|let's do that|approve|post)\b")
@@ -115,13 +120,39 @@ def _first_word(text: str) -> str:
     return words[0].strip(string.punctuation).lower() if words else ""
 
 
+def _segments(text: str) -> List[str]:
+    """`text` cut at every email, UUID and ticket key, which are dropped; nothing joins across a cut."""
+    for regex in _SKIP_RES:
+        text = regex.sub(_CUT, text)
+    return text.split(_CUT)
+
+
+def _opener(text: str) -> str:
+    """The first word that is not an email, UUID or ticket key, stripped of punctuation ("" when none)."""
+    for segment in _segments(text):
+        words = segment.split()
+        if words:
+            return words[0].strip(_TYPO_STRIP).lower()
+    return ""
+
+
 def _content_sequence(text: str) -> List[str]:
     stop = lexicon.stopwords()
-    return [tok for tok in cluster._CONTENT_TOKEN_RE.findall(text.lower()) if tok not in stop]
+    return [tok for segment in _segments(text) for tok in cluster._CONTENT_TOKEN_RE.findall(segment.lower())
+            if tok not in stop]
 
 
-def _ngrams(tokens: List[str], size: int) -> List[str]:
-    return [" ".join(tokens[i:i + size]) for i in range(len(tokens) - size + 1)]
+def _text_ngrams(text: str, size: int) -> List[str]:
+    """N-grams over the verbatim lowercase word sequence of each segment, kept when one word is not a stopword."""
+    stop = lexicon.stopwords()
+    out = []
+    for segment in _segments(text):
+        words = _SEQ_WORD_RE.findall(segment.lower())
+        for i in range(len(words) - size + 1):
+            gram = words[i:i + size]
+            if any(word not in stop for word in gram):
+                out.append(" ".join(gram))
+    return out
 
 
 def _ranked(counter: Counter, allowed: Set[str], limit: int) -> List[dict]:
@@ -184,13 +215,19 @@ def _repo_pieces(prompts: List[dict]) -> Set[str]:
     return pieces
 
 
-def _typos(prompts: List[dict], visible_prompts: List[dict]) -> Tuple[Optional[List[dict]], Optional[str]]:
+def _code_like(raw: str) -> bool:
+    """A path, flag, dotfile, snake_case or backticked token: never a typo."""
+    return raw.startswith(_CODE_START) or any(mark in raw for mark in _CODE_INNER)
+
+
+def _typos(skip: Set[str], visible_prompts: List[dict]) -> Tuple[Optional[List[dict]], Optional[str]]:
     if lexicon.dictionary() is None:
         return None, "typo detection skipped: no system dictionary at %s" % lexicon.DICT_PATH
-    skip = _repo_pieces(prompts)
     counts = Counter()  # type: Counter
     for prompt in visible_prompts:
         for raw in _text(prompt).split():
+            if _code_like(raw):
+                continue
             token = raw.strip(_TYPO_STRIP)
             if _TYPO_RE.match(token) and token not in skip and lexicon.known_word(token) is False:
                 counts[token] += 1
@@ -236,9 +273,11 @@ def _rarity_share(prompts: List[dict]) -> float:
     return _ratio(sum(1 for count in frequency.values() if count == 1), total)
 
 
-def compute_metrics(prompts: List[dict], visible: Callable[[dict], bool], cfg: Optional[dict] = None) -> dict:
+def compute_metrics(prompts: List[dict], visible: Callable[[dict], bool], cfg: Optional[dict] = None,
+                    repo_pieces: Optional[Set[str]] = None) -> dict:
     """Statistics over `prompts`. `ack` prompts count only toward registers (counts, length by register,
-    lexicon); every other statistic uses the remaining prompts."""
+    lexicon); every other statistic uses the remaining prompts. `repo_pieces` (repo and cwd pieces of every
+    event, used only to exclude typos) adds to the pieces of `prompts` themselves."""
     flags = [bool(visible(prompt)) for prompt in prompts]
     body = [prompt for prompt in prompts if prompt.get("register") != "ack"]
     body_visible = [prompt for prompt in body if visible(prompt)]
@@ -256,12 +295,12 @@ def compute_metrics(prompts: List[dict], visible: Callable[[dict], bool], cfg: O
     letters = [len(word) for text in texts for word in _WORD_RE.findall(text)]
     sequence = [word.lower() for text in texts for word in _WORD_RE.findall(text)][:TTR_TOKENS]
 
-    visible_openers = {_first_word(_text(p)) for p in body_visible}
-    visible_content = [_content_sequence(_text(p)) for p in body_visible]
-    visible_words = {tok for toks in visible_content for tok in toks}
-    visible_grams = {size: {g for toks in visible_content for g in _ngrams(toks, size)} for size in (2, 3)}
+    visible_openers = {_opener(_text(p)) for p in body_visible}
+    visible_words = {tok for p in body_visible for tok in _content_sequence(_text(p))}
+    visible_grams = {size: {g for p in body_visible for g in _text_ngrams(_text(p), size)} for size in (2, 3)}
     content = [_content_sequence(text) for text in texts]
-    typos, typos_note = _typos(prompts, [p for p, can_see in zip(prompts, flags) if can_see])
+    skip = _repo_pieces(prompts) | set(repo_pieces or ())
+    typos, typos_note = _typos(skip, [p for p, can_see in zip(prompts, flags) if can_see])
 
     return {
         "counts": {
@@ -280,9 +319,11 @@ def compute_metrics(prompts: List[dict], visible: Callable[[dict], bool], cfg: O
         "avg_word_len": _ratio(sum(letters), len(letters)),
         "ttr_5000": _ratio(len(set(sequence)), len(sequence)),
         "registers": _registers(prompts),
-        "openers": _ranked(Counter(_first_word(text) for text in texts), visible_openers, OPENER_LIMIT),
-        "bigrams": _ranked(Counter(g for toks in content for g in _ngrams(toks, 2)), visible_grams[2], NGRAM_LIMIT),
-        "trigrams": _ranked(Counter(g for toks in content for g in _ngrams(toks, 3)), visible_grams[3],
+        "openers": _ranked(Counter(o for o in (_opener(text) for text in texts) if o), visible_openers,
+                           OPENER_LIMIT),
+        "bigrams": _ranked(Counter(g for text in texts for g in _text_ngrams(text, 2)), visible_grams[2],
+                           NGRAM_LIMIT),
+        "trigrams": _ranked(Counter(g for text in texts for g in _text_ngrams(text, 3)), visible_grams[3],
                             NGRAM_LIMIT),
         "top_words": _ranked(Counter(tok for toks in content for tok in toks), visible_words, TOP_WORD_LIMIT),
         "punctuation": _punctuation(texts),
@@ -407,7 +448,8 @@ def build_profile(home: str, env: Mapping, cfg: dict, real_home: str) -> dict:
         "prompts_all": len(prompts),
         "low_sample": len(prompts) < LOW_SAMPLE,
         "generated_at": config.utc_now_iso(),
-        "metrics": compute_metrics(prompts, visible, cfg),
+        # pieces of every event's repo and cwd, any kind and any group: an exclusion set only, never output
+        "metrics": compute_metrics(prompts, visible, cfg, repo_pieces=_repo_pieces(raw)),
         "exemplars": exemplars,
         "exemplars_left_out": left_out,
         "model": {},

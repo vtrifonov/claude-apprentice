@@ -26,7 +26,11 @@ BATCH_SIZE = 40
 MAX_CONSECUTIVE_FAILURES = 3
 TIMEOUT_S = 120
 MODEL = "haiku"
-EXTRA_CHILD_ARGS = ["--no-session-persistence"]  # type: List[str]
+# --safe-mode with an empty tool list: no tools, MCP servers or other plugins' hooks in the child (probed with OAuth).
+EXTRA_CHILD_ARGS = ["--no-session-persistence", "--safe-mode", "--tools", ""]  # type: List[str]
+TOPIC_MAX_WORDS = 4
+TOPIC_MAX_CHARS = 60
+SKETCH_MAX_CHARS = 200
 
 _SLUG_RE = re.compile(r"[^a-z0-9_-]+")
 _FENCE_RE = re.compile(r"^```[A-Za-z0-9_-]*[ \t]*\n(.*?)\n?```$", re.S)
@@ -148,26 +152,33 @@ def _valid_item(item, ids, cfg: dict) -> Optional[dict]:
         return None
     if not isinstance(item["topic"], str) or not isinstance(item["rule_sketch"], str):
         return None
-    if len(item["rule_sketch"].split()) > 20:
+    if len(item["rule_sketch"].split()) > 20 or len(item["rule_sketch"]) > SKETCH_MAX_CHARS:
         return None
-    topic = _SLUG_RE.sub("-", scrub.scrub(item["topic"], cfg)[0].strip().lower()).strip("-")
+    slug = _SLUG_RE.sub("-", scrub.scrub(item["topic"], cfg)[0].strip().lower())
+    words = [word for word in slug.split("-") if word]
+    topic = "-".join(words[:TOPIC_MAX_WORDS])[:TOPIC_MAX_CHARS].strip("-")
+    if not topic:
+        return None
     return {"id": item["id"], "is_correction": item["is_correction"], "topic": topic,
             "rule_sketch": scrub.scrub(item["rule_sketch"], cfg)[0], "confidence": float(conf)}
 
 
-def _run_child(binary: str, prompt: str, env) -> object:
+def _run_child(binary: str, prompt: str, env, cwd: str) -> object:
     cmd = [binary, "-p", "--model", MODEL, "--output-format", "json"] + list(EXTRA_CHILD_ARGS)
     try:
-        proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=TIMEOUT_S,
-                              env=_child_env(env))
+        # bytes both ways: a lone surrogate in a prompt or non-UTF-8 output must not abort the run
+        proc = subprocess.run(cmd, input=prompt.encode("utf-8", "replace"), capture_output=True,
+                              timeout=TIMEOUT_S, env=_child_env(env), cwd=cwd)
     except subprocess.TimeoutExpired:
         return "timeout"
     except OSError:
         return "cannot run the claude binary"
+    except Exception as exc:  # any other child failure only skips the batch
+        return "child run failed (%s)" % exc.__class__.__name__
     if proc.returncode != 0:
         # a limit failure still carries a JSON envelope; the exit status alone decides
         return "exit status %d" % proc.returncode
-    return _parse_envelope(proc.stdout)
+    return _parse_envelope(proc.stdout.decode("utf-8", "replace"))
 
 
 def run_batches(pairs: List[dict], home: str, env, max_batches: Optional[int],
@@ -175,6 +186,9 @@ def run_batches(pairs: List[dict], home: str, env, max_batches: Optional[int],
     summary = {"batches": 0, "cached": 0, "skipped": 0, "stopped_early": False}
     cfg = config.load_config(home)
     binary = env.get("APPRENTICE_CLAUDE_BIN") or "claude"
+    # run the child outside any project, so it loads no project CLAUDE.md or settings
+    child_cwd = os.path.join(home, "state")
+    os.makedirs(child_cwd, mode=0o700, exist_ok=True)
     failures = 0
     for start in range(0, len(pairs), BATCH_SIZE):
         if max_batches is not None and summary["batches"] >= max_batches:
@@ -190,7 +204,7 @@ def run_batches(pairs: List[dict], home: str, env, max_batches: Optional[int],
         if not batch:
             continue
         summary["batches"] += 1
-        outcome = _run_child(binary, build_prompt(batch, cfg), env)
+        outcome = _run_child(binary, build_prompt(batch, cfg), env, child_cwd)
         if isinstance(outcome, str):
             failures += 1
             summary["skipped"] += len(batch)

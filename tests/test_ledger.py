@@ -127,9 +127,58 @@ class ScriptTest(ApprenticeTestCase):
         self.write(self.pack, json.dumps({"inputs": {"group": group}, "candidates": candidates}))
 
     def entries(self, rule_id):
+        # Full stored entries; `show` strips the sidecar-derived fields, so read the ledger file itself.
+        return [e for e in ledger.read_proposals(self.home) if e.get("id") == rule_id]
+
+    def shown(self, rule_id):
         result = self.run_script("show", "--id", rule_id)
         self.assertEqual(result.returncode, 0, result.stderr)
         return [json.loads(line) for line in result.stdout.decode().splitlines() if line.strip()]
+
+    def test_record_and_show_stdout_never_echo_sidecar_fields(self):
+        marker = "zqmarkerword"
+        self.write_pack([{"id": "A", "kind": "correction", "topic": "tabs", "evidence_ids": ["e1"]},
+                         {"id": "B", "kind": "correction", "topic": "b", "evidence_ids": ["e2"]}])
+        ledger.write_private(self.home, self.pack, {
+            "A": {"tokens": [[marker, "beta"]], "cluster_key": marker + "-key", "evidence_ids": ["e1"], "n": 2},
+            "B": {"tokens": [[marker + "b"]], "cluster_key": None, "evidence_ids": [marker + "-ev"], "n": 3},
+        })
+        result = self.run_script("record", "--id", "A", "--status", "shown", "--pack", self.pack,
+                                 "--merged-ids", "B")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.decode(), "recorded id=A status=shown\n")
+        self.assertIn(marker, json.dumps(self.entries("A")))  # stored, just never printed
+        ledger.append_proposal(self.home, {"id": "A", "status": "edited",
+                                           "extra": {"nested": [{"tokens": [marker], "cluster_key": marker,
+                                                                 "evidence_ids": [marker], "keep": 1}]}})
+        result = self.run_script("show", "--id", "A")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(marker, result.stdout.decode())
+        rows = self.shown("A")
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            for key in ("tokens", "cluster_key", "evidence_ids"):
+                self.assertNotIn(key, row)
+        self.assertEqual(rows[1]["extra"], {"nested": [{"keep": 1}]})
+        self.assertEqual(rows[0]["merged_ids"], ["B"])
+
+    def test_user_edit_file_confined_and_free_text_scrubbed(self):
+        self.write_pack([{"id": "A", "kind": "correction", "topic": "a", "evidence_ids": []}])
+        self.write(os.path.join(self.home, "config.json"),
+                   json.dumps({"extra_redact_patterns": ["zqsecret\\d+"]}))
+        outside = self.write(os.path.join(self.home, "elsewhere.txt"), "hi")
+        result = self.run_script("record", "--id", "A", "--status", "edited", "--pack", self.pack,
+                                 "--user-edit-file", outside)
+        self.assertEqual(result.returncode, 2)
+        inside = self.write(os.path.join(self.home, "state", "tmp", "A.edit.txt"), "it's `zqsecret42` $(x)")
+        text = self.write(os.path.join(self.home, "state", "tmp", "A.txt"), "rule zqsecret43")
+        result = self.run_script("record", "--id", "A", "--status", "edited", "--pack", self.pack,
+                                 "--user-edit-file", inside, "--text-file", text, "--reason", "why zqsecret44")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        entry = self.entries("A")[-1]
+        self.assertEqual(entry["user_edit"], "it's `<redacted:custom>` $(x)")
+        self.assertEqual(entry["text"], "rule <redacted:custom>")
+        self.assertEqual(entry["reason"], "why <redacted:custom>")
 
     def test_script_record_reads_tokens_from_sidecar(self):
         self.write_pack([{"id": "A", "kind": "correction", "topic": "tabs", "evidence_ids": ["e1", "e2"],

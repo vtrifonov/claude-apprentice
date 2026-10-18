@@ -10,6 +10,10 @@ SUGGEST = os.path.join(REPO_ROOT, "commands", "suggest.md")
 DEFAULT_OPTIONS = ["Accept (Recommended)", "Decline", "Later", "Edit or rescope"]
 RESCOPE_TRACKED = ["Rescope to global CLAUDE.md (Recommended)", "Accept into the tracked file", "Decline", "Later"]
 RESCOPE_LOCAL = ["Rescope to global CLAUDE.md (Recommended)", "Decline", "Later", "Edit or rescope"]
+TRACKED_GLOBAL_PUBLIC = ["Accept into the tracked file", "Decline", "Later (Recommended)", "Edit or rescope"]
+TRACKED_GLOBAL_PRIVATE = ["Accept into the tracked file (Recommended)", "Decline", "Later", "Edit or rescope"]
+TONE = os.path.join(REPO_ROOT, "commands", "tone.md")
+INTERP = '"${APPRENTICE_PYTHON:-/usr/bin/python3}" -I -S "<root>/'
 
 
 def _read(path):
@@ -78,3 +82,47 @@ class CommandsTest(ApprenticeTestCase):
         text = _read(SKILL)
         for needle in ("events/", "ledger/", "state/pack-private/"):
             self.assertIn(needle, text)
+
+    def test_skill_tracked_global_picker_shapes(self):
+        text = _read(SKILL)
+        for options in (TRACKED_GLOBAL_PUBLIC, TRACKED_GLOBAL_PRIVATE):
+            self.assertIn(", ".join("`%s`" % o for o in options), text)
+
+    def test_skill_tracked_dry_run_line_and_text_file_first(self):
+        text = _read(SKILL)
+        self.assertIn("scripts/apply.py --id <id> --text-file <home>/state/tmp/<id>.txt --scope <scope> "
+                      "--target <target> --pack <json> --confirm-tracked --dry-run", text)
+        self.assertNotIn("--text-file <file>", text)
+        self.assertIn("Write the rule text to `<home>/state/tmp/<id>.txt` before the dry-run or any tracked block, "
+                      "and rewrite it after every edit", text)
+
+    def test_skill_tracked_rule_covers_every_target(self):
+        text = _read(SKILL)
+        self.assertIn("Any target, the default or a rescope entry, with `target_git.tracked` true", text)
+        self.assertIn("`--scope` and `--target` both come from the chosen entry", text)
+
+    def test_skill_user_edit_goes_through_a_file(self):
+        text = _read(SKILL)
+        self.assertIn("--user-edit-file <home>/state/tmp/<id>.edit.txt", text)
+        self.assertNotRegex(text, r"--user-edit(?!-file)")
+
+    def test_skill_exit_2_rejected_picker_and_reason_prefix(self):
+        text = _read(SKILL)
+        for needle in ("On exit 2, show stderr, record nothing, and continue with the next candidate",
+                       "The user doesn't want to proceed",
+                       "stop the review and print the summary line",
+                       "without the `skipped:` prefix"):
+            self.assertIn(needle, text)
+
+    def test_suggest_and_tone_spell_the_interpreter_inline(self):
+        for path in (SUGGEST, TONE):
+            text = _read(path)
+            fields = _frontmatter(text)
+            for name in ("Read", "Write"):
+                self.assertIn(name, [t.strip() for t in fields["allowed-tools"].split(",")], path)
+            self.assertNotIn("PY=", text, path)
+            self.assertNotIn("$PY", text, path)
+            calls = re.findall(r"(.{0,%d})scripts/\w+\.py" % len(INTERP), text)
+            self.assertTrue(calls, path)
+            for prefix in calls:
+                self.assertTrue(prefix.endswith(INTERP), "%s: %r" % (path, prefix))

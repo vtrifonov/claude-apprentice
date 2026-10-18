@@ -103,16 +103,20 @@ class MetricTests(ToneTestCase):
                                                  {"text": "2", "count": 1}])
         self.assertEqual(self.texts(result["openers"]),
                          ["add", "please", "2", "any", "but", "hello", "i", "let's", "we", "where"])
+        # verbatim word sequences, kept with at least one non-stopword: V1 "add the retry helper" and W8 "add
+        # retry helper" share "retry helper" only; "add the" is V1+W1, "the module" V5+W8, "the retry" V1+V8
         bigrams = result["bigrams"]
-        self.assertEqual(bigrams[:3], [{"text": "add retry", "count": 2}, {"text": "retry helper", "count": 2},
-                                       {"text": "acme widgets", "count": 1}])
+        self.assertEqual(bigrams[:6], [{"text": "add the", "count": 2}, {"text": "discuss about", "count": 2},
+                                       {"text": "retry helper", "count": 2}, {"text": "the module", "count": 2},
+                                       {"text": "the retry", "count": 2}, {"text": "2 create", "count": 1}])
         self.assertEqual(len(bigrams), 20)
         trigrams = result["trigrams"]
-        self.assertEqual(trigrams[0], {"text": "add retry helper", "count": 2})
+        self.assertEqual(trigrams[:2], [{"text": "discuss about the", "count": 2},
+                                        {"text": "2 create handler", "count": 1}])
         self.assertEqual(len(trigrams), 20)
-        for forbidden in ("build slow", "helper missing", "module helper"):
+        for forbidden in ("add retry", "the build", "build slow", "helper missing"):
             self.assertNotIn(forbidden, self.texts(bigrams))
-        for forbidden in ("retry helper module", "helper module helper"):
+        for forbidden in ("add retry helper", "retry helper to", "is helper missing"):
             self.assertNotIn(forbidden, self.texts(trigrams))
         top_words = result["top_words"]
         self.assertEqual(top_words[:13], [
@@ -161,6 +165,50 @@ class MetricTests(ToneTestCase):
         # widgets (piece of the repo name) and alice (cwd component) never qualify.
         self.assertEqual(spelling["typos"], [{"word": "recieve", "count": 3}])
         self.assertIsNone(spelling["typos_note"])
+
+    def test_typos_reject_code_like_raw_tokens(self):
+        line = ("check __init__ and `kubectl` and ~/.bashrc and -verboseflag and .envrcfile and some/pathpart "
+                "and inner`tick and recieve")
+        prompts = [make_prompt("C%d" % i, "default", "direction", line, 1) for i in range(2)]
+        path = self.write(os.path.join(self.home, "mini-words"), "check\nsome\n")
+        with mock.patch.object(lexicon, "DICT_PATH", path):
+            spelling = self.metrics(prompts)["spelling"]
+        self.assertEqual(spelling["typos"], [{"word": "recieve", "count": 2}])
+
+    def test_repo_pieces_argument_extends_the_typo_exclusions(self):
+        prompts = [make_prompt("F%d" % i, "default", "direction", "fix the flimflam build", 1) for i in range(2)]
+        path = self.write(os.path.join(self.home, "mini-words"), "build\n")
+        with mock.patch.object(lexicon, "DICT_PATH", path):
+            without = tone.compute_metrics(prompts, visible, self.cfg)["spelling"]["typos"]
+            within = tone.compute_metrics(prompts, visible, self.cfg, repo_pieces={"flimflam"})["spelling"]["typos"]
+        self.assertIn({"word": "flimflam", "count": 2}, without)
+        self.assertNotIn("flimflam", [entry["word"] for entry in within])
+
+    def test_list_entries_skip_email_uuid_ticket_and_empty_openers(self):
+        email = "alice" + "@" + "mail" + ".test"
+        uuid = "123e4567-e89b-42d3-a456-426614174000"
+        texts = ["%s please rerun" % email, "%s rerun now" % uuid, "XX-123 rerun later",
+                 "!!! rerun soon", "add the tests", "add the tests"]
+        prompts = [make_prompt("E%d" % i, "default", "direction", text, 1) for i, text in enumerate(texts)]
+        result = self.metrics(prompts)
+        listed = [entry["text"] for key in ("openers", "bigrams", "trigrams", "top_words") for entry in result[key]]
+        for fragment in ("alice", "mail", "123e4567", "xx-123", "xx", "426614174000"):
+            self.assertFalse(any(fragment in text.split() or fragment == text for text in listed), fragment)
+        self.assertNotIn("", self.texts(result["openers"]))
+        # the opener is the first word that is not an email, UUID or ticket key; "!!!" leaves none
+        self.assertEqual(result["openers"], [{"text": "add", "count": 2}, {"text": "rerun", "count": 2},
+                                             {"text": "please", "count": 1}])
+
+    def test_ngrams_are_verbatim_with_a_content_word(self):
+        prompts = [make_prompt("G%d" % i, "default", "direction", "fix the tests of it", 1) for i in range(2)]
+        result = self.metrics(prompts)
+        # "of it" is two stopwords, so it is dropped; ties sort by text
+        self.assertEqual(result["bigrams"], [{"text": "fix the", "count": 2}, {"text": "tests of", "count": 2},
+                                             {"text": "the tests", "count": 2}])
+        self.assertEqual(result["trigrams"], [{"text": "fix the tests", "count": 2},
+                                              {"text": "tests of it", "count": 2},
+                                              {"text": "the tests of", "count": 2}])
+        self.assertNotIn("fix tests", self.texts(result["bigrams"]))
 
     def test_typos_none_with_note_when_dictionary_missing(self):
         missing = os.path.join(self.home, "no-such-words")

@@ -32,6 +32,14 @@ scripts/ledger.py record --id <id> --status shown --pack <json> [--merged-ids <i
 
 ## Show one block
 
+Write the rule text to `<home>/state/tmp/<id>.txt` before the dry-run or any tracked block, and rewrite it after every edit. The dry-run for a tracked target is:
+
+```
+scripts/apply.py --id <id> --text-file <home>/state/tmp/<id>.txt --scope <scope> --target <target> --pack <json> --confirm-tracked --dry-run
+```
+
+`--confirm-tracked` only lets the dry run reach the diff; a dry run writes nothing and records nothing.
+
 Lines, in order:
 
 1. The rule text.
@@ -40,7 +48,7 @@ Lines, in order:
    - `git-tracked-local`: "CLAUDE.local.md is committed in <repo>; repo rules cannot go there".
    - `unknown-tracking`: "git could not say whether CLAUDE.local.md is committed in <repo>; repo rules cannot go there".
    - global: "global CLAUDE.md is shared by symlink with account groups <target_shared_groups>" (when the list is non-empty).
-   - a tracked skill or global target (`target_git.tracked`): "this file is tracked in <root>; remote <remote> is <visibility>", then the exact diff from `scripts/apply.py --id <id> --text-file <file> --scope <scope> --target <target> --pack <json> --dry-run`. For `public_mirror`: "this skill is mirrored publicly by hand (public_skills)".
+   - Any target, the default or a rescope entry, with `target_git.tracked` true: "this file is tracked in <root>; remote <remote> is <visibility>", then the exact diff from the dry-run above, run with that entry's scope and target. For `public_mirror`: "this skill is mirrored publicly by hand (public_skills)".
 3. `confidence: <band> · n=<n> · sessions=<s> · repos=<r> · <first_seen>..<last_seen>`.
 4. The `departure` sentence, or "no separating feature" followed by `departure_rows`.
 5. Up to two `quotes`, then "N more from other account groups (text withheld)" when `text_withheld.events > 0`.
@@ -52,10 +60,11 @@ Ask exactly one `AskUserQuestion` with exactly one question. Options, in this or
 
 - Default: `Accept (Recommended)`, `Decline`, `Later`, `Edit or rescope`.
 - `recommend` is `rescope-global` and the target is a tracked skill: `Rescope to global CLAUDE.md (Recommended)`, `Accept into the tracked file`, `Decline`, `Later`.
-- `recommend` is `rescope-global` and the target is the tracked global file: `Accept into the tracked file (Recommended)`, `Decline`, `Later`, `Edit or rescope`.
+- The target is the tracked global file and `recommend` is `rescope-global` (public or unknown remote): `Accept into the tracked file`, `Decline`, `Later (Recommended)`, `Edit or rescope`.
+- The target is the tracked global file and `recommend` is not `rescope-global` (private remote): `Accept into the tracked file (Recommended)`, `Decline`, `Later`, `Edit or rescope`.
 - `recommend` is `rescope-global` because `target_status` is `git-tracked-local` or `unknown-tracking`: `Rescope to global CLAUDE.md (Recommended)`, `Decline`, `Later`, `Edit or rescope`.
 
-The Other field is always available. Free text wins over the pick and is read as an edit (`accept but repo`, `reword: …`, `global`, `skill <name>`). `stop` or `enough` alone, any case, ends the run before the next candidate. No other picker shape anywhere.
+The Other field is always available. Free text wins over the pick and is read as an edit (`accept but repo`, `reword: …`, `global`, `skill <name>`). `stop` or `enough` alone, any case, ends the run before the next candidate. A rejected picker (`is_error`, content starting `The user doesn't want to proceed`) means stop the review and print the summary line; record nothing for that candidate. No other picker shape anywhere.
 
 ## Outcomes
 
@@ -67,7 +76,8 @@ scripts/apply.py --id <id> --text-file <home>/state/tmp/<id>.txt --scope <scope>
 
 - Pass `--merged-ids` whenever the candidate was merged, with the same list given to its `ledger.py record` calls, so the `accepted` entry keeps the aliases and seed sets.
 - Pass `--confirm-tracked` only after `Accept into the tracked file`, or after `Accept` on a block that showed the tracking line and diff.
-- On exit 1, show the one-line reason and run `scripts/ledger.py record --id <id> --status accept_failed --reason <reason> --pack <json>`.
+- On exit 1, show the one-line reason and run `scripts/ledger.py record --id <id> --status accept_failed --reason <reason> --pack <json>`. Pass the reason without the `skipped:` prefix (`result=skipped:hardlinked` gives `--reason hardlinked`).
+- On exit 2, show stderr, record nothing, and continue with the next candidate.
 - On `sensitive-text`, offer one reworded version through the same block and picker.
 - A candidate with `target_status` `no-checkout`, `git-tracked-local` or `unknown-tracking` is never passed to apply. Record `accept_failed` with reason `no-checkout`, `git-tracked-local` or `git-index-unknown` respectively.
 
@@ -75,13 +85,13 @@ scripts/apply.py --id <id> --text-file <home>/state/tmp/<id>.txt --scope <scope>
 
 **Later.** `scripts/ledger.py record --id <id> --status snoozed --pack <json>`.
 
-**Edit or free text.** `scripts/ledger.py record --id <id> --status edited --user-edit <text> --pack <json>`, then re-show once with the edit applied and the same picker. Further edits repeat.
+**Edit or free text.** Write the user's words, as typed, to `<home>/state/tmp/<id>.edit.txt`, then run `scripts/ledger.py record --id <id> --status edited --user-edit-file <home>/state/tmp/<id>.edit.txt --pack <json>`. Never put the user's text on the command line. Rewrite `<home>/state/tmp/<id>.txt` with the edited rule, then re-show once with the edit applied and the same picker. Further edits repeat.
 
-**Rescope.**
+**Rescope.** `--scope` and `--target` both come from the chosen entry: its scope (`global`, `repo` or `skill`) and its `target`, on the dry-run and on apply alike. An entry with `target_git.tracked` true re-shows the block with the tracking line and the dry-run diff for that entry's scope and target, and Accept on it passes `--confirm-tracked`.
 - `global`: use `alt_targets.global`.
 - `repo`: use the single `alt_targets.repo` entry, or the one named by `owner/name` or bare `name`. Several and none named: re-show once listing the names. Still none: `accept_failed --reason no-target`.
 - An entry with `no-checkout`, `git-tracked-local` or `unknown-tracking`: `accept_failed` with that reason (as above); apply is not called.
-- `skill`: use `alt_targets.skill` when it matches the named skill (or none is named). A `rescoped-readonly` entry falls back to global with the skill in the lead. A tracked entry re-shows the block with the tracking line and diff before any `--confirm-tracked`. A different skill, or null: `accept_failed --reason no-target`.
+- `skill`: use `alt_targets.skill` when it matches the named skill (or none is named). A `rescoped-readonly` entry falls back to global with the skill in the lead. A different skill, or null: `accept_failed --reason no-target`.
 
 ## End
 

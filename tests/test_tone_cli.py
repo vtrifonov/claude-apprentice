@@ -86,6 +86,16 @@ class BuildTests(ToneCliTestCase):
         self.assertIn("zorbalice", _read_bytes(other_md).decode("utf-8"))
         self.assertEqual((_read_bytes(json_path), _read_bytes(md_path)), before)
 
+    def test_repo_pieces_come_from_every_event(self):
+        from tests.fixtures.events.prompts import prompt_event
+        ask = prompt_event(kind="ask", profile=tone_corpus.HIDDEN_PROFILE, repo="acme/flimflam",
+                           cwd="/work/zorptool")
+        self.add(tone_corpus.corpus() + [ask])
+        with mock.patch.object(tone, "compute_metrics", wraps=tone.compute_metrics) as spy:
+            self.build()
+        pieces = spy.call_args[1]["repo_pieces"]
+        self.assertTrue({"acme", "flimflam", "work", "zorptool"} <= pieces)
+
     def test_low_sample_banner(self):
         self.add(tone_corpus.corpus())
         profile, _ = self.build()
@@ -284,8 +294,9 @@ class ScriptTests(ToneCliTestCase):
         self.assertEqual(fields["description"],
                          "Build the writing profile for this account group and install the tone pointer")
         self.assertEqual(fields["argument-hint"], "[--refresh]")
-        self.assertEqual(fields["allowed-tools"], "Bash(${APPRENTICE_PYTHON:-/usr/bin/python3} *), AskUserQuestion")
-        for needle in ("scripts/tone.py $ARGUMENTS", "--set-model", "--set-display-name", "state/tmp/",
+        self.assertEqual(fields["allowed-tools"],
+                         "Bash(${APPRENTICE_PYTHON:-/usr/bin/python3} *), AskUserQuestion, Read, Write")
+        for needle in ('"<root>/scripts/tone.py" $ARGUMENTS', "--set-model", "--set-display-name", "state/tmp/",
                        "Install tone pointer in global CLAUDE.md (Recommended)", "Not now", tone.TONE_POINTER_ID,
                        "--text-file", "--scope global", "--print-pointer", "proficiency_justification"):
             self.assertIn(needle, text)

@@ -147,6 +147,17 @@ class GlobalApplyTest(ApplyCliCase):
         self.assertIn(TEXT, self.read(self.claude_md))
         self.assertIs(ledger.read_applied(self.home)[-1]["tracked"], True)
 
+    def test_tracked_dry_run_shows_diff_without_confirm_and_writes_nothing(self):
+        self.write(os.path.join(self.fake_home, ".claude", ".git", "HEAD"), "ref: refs/heads/main\n")
+        self.write_pack([{"id": A, "kind": "correction", "topic": "t", "evidence_ids": [], "repos": []}], {})
+        result = self.applied_global(A, "--pack", self.pack, "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("result=written", self.out(result))
+        self.assertIn("+- " + TEXT, self.out(result))
+        self.assertEqual(self.read(self.claude_md), "# Mine\n")
+        self.assertEqual(ledger.read_applied(self.home), [])
+        self.assertEqual(ledger.read_proposals(self.home), [])
+
     def test_removed_flags(self):
         for flag in ("--include-unknown", "--all-profiles"):
             result = self.run_script(flag)

@@ -26,30 +26,43 @@ def _record(args, home_dir: str) -> int:
                 return _fail("merged id is not a candidate of the pack: %s" % member)
     text = None
     if args.text_file:
-        tmp_root = os.path.realpath(os.path.join(home_dir, "state", "tmp"))
-        resolved = os.path.realpath(args.text_file)
-        if not resolved.startswith(tmp_root + os.sep):
-            return _fail("--text-file must be under %s" % tmp_root)
-        try:
-            with open(resolved, "r", encoding="utf-8") as fh:
-                text = fh.read()
-        except (OSError, ValueError) as exc:
-            return _fail("cannot read --text-file: %s" % exc.__class__.__name__)
+        text, error = _read_tmp_file(home_dir, args.text_file, "--text-file")
+        if error:
+            return _fail(error)
+    user_edit = args.user_edit
+    if args.user_edit_file:
+        user_edit, error = _read_tmp_file(home_dir, args.user_edit_file, "--user-edit-file")
+        if error:
+            return _fail(error)
     try:
         entry = ledger.record_decision(
             home_dir, args.pack, args.id, args.status, text=text, scope=args.scope, target=args.target,
-            user_edit=args.user_edit, reason=args.reason, n_at_decision=args.n_at_decision,
+            user_edit=user_edit, reason=args.reason, n_at_decision=args.n_at_decision,
             merged_ids=merged, profile=config.current_profile(os.environ))
     except ValueError as exc:
         return _fail(str(exc))
-    sys.stdout.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    # One fixed line: the entry carries sidecar-derived fields that must never reach the session.
+    sys.stdout.write("recorded id=%s status=%s\n" % (entry["id"], entry["status"]))
     return 0
+
+
+def _read_tmp_file(home_dir: str, path: str, flag: str):
+    """(content, None) for a readable file under state/tmp, else (None, error message)."""
+    tmp_root = os.path.realpath(os.path.join(home_dir, "state", "tmp"))
+    resolved = os.path.realpath(path)
+    if not resolved.startswith(tmp_root + os.sep):
+        return None, "%s must be under %s" % (flag, tmp_root)
+    try:
+        with open(resolved, "r", encoding="utf-8") as fh:
+            return fh.read(), None
+    except (OSError, ValueError) as exc:
+        return None, "cannot read %s: %s" % (flag, exc.__class__.__name__)
 
 
 def _show(args, home_dir: str) -> int:
     for entry in ledger.read_proposals(home_dir):
         if entry.get("id") == args.id:
-            sys.stdout.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            sys.stdout.write(json.dumps(ledger.strip_private(entry), ensure_ascii=False) + "\n")
     return 0
 
 
@@ -67,11 +80,12 @@ def main(argv) -> int:
     rec.add_argument("--text-file")
     rec.add_argument("--scope")
     rec.add_argument("--target")
-    rec.add_argument("--user-edit")
+    rec.add_argument("--user-edit", help="kept for compatibility; prefer --user-edit-file")
+    rec.add_argument("--user-edit-file", help="file under state/tmp holding the user's edit")
     rec.add_argument("--reason")
     rec.add_argument("--n-at-decision", type=int)
     rec.add_argument("--merged-ids", help="comma-separated candidate ids merged into this one")
-    show = sub.add_parser("show", help="print the entries of one id as JSON lines")
+    show = sub.add_parser("show", help="print the entries of one id as JSON lines, without sidecar fields")
     show.add_argument("--id", required=True)
     args = parser.parse_args(argv)
     home_dir = config.home()

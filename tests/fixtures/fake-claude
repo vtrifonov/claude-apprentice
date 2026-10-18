@@ -10,8 +10,9 @@ iserror    exit 0 with is_error true
 limit      exit 1 with the weekly-limit envelope (subtype still says success)
 timeout    sleeps 5 s
 exit1      exits 1 with no output
+badutf8    the valid envelope, with a raw 0xff byte in place of "other" in every rule_sketch
 
-Every call appends one JSON line {argv, stdin, env} to $FAKE_CLAUDE_DUMP when it is set.
+Every call appends one JSON line {argv, stdin, env, cwd} to $FAKE_CLAUDE_DUMP when it is set.
 """
 import json
 import os
@@ -39,7 +40,8 @@ def main():
     dump = os.environ.get("FAKE_CLAUDE_DUMP")
     if dump:
         with open(dump, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps({"argv": sys.argv, "stdin": stdin, "env": dict(os.environ)}) + "\n")
+            fh.write(json.dumps({"argv": sys.argv, "stdin": stdin, "env": dict(os.environ),
+                                 "cwd": os.getcwd()}) + "\n")
     mode = os.environ.get("FAKE_CLAUDE_MODE", "valid")
     if mode == "valid":
         print(json.dumps(_envelope(json.dumps(_verdicts(stdin)))))
@@ -62,6 +64,9 @@ def main():
         time.sleep(5)
     elif mode == "exit1":
         sys.exit(1)
+    elif mode == "badutf8":
+        out = json.dumps(_envelope(json.dumps(_verdicts(stdin)))).encode("utf-8")
+        sys.stdout.buffer.write(out.replace(b"the other helper", b"the \xff helper") + b"\n")
     else:
         sys.exit(3)
 
