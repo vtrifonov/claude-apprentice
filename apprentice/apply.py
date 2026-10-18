@@ -227,14 +227,16 @@ def write_target(path: str, transform: Callable[[str], Tuple[str, str]], home: s
 
 
 def apply_rule_to_file(path: str, rule_id: str, text: str, n: int, band: str, date: str, home: str,
-                       dry_run: bool = False, cfg: Optional[dict] = None) -> dict:
+                       dry_run: bool = False, cfg: Optional[dict] = None, info: Optional[dict] = None) -> dict:
     clean = scrub.scrub(text, cfg if cfg is not None else config.load_config(home))[0] or ""
     line = render_line(rule_id, clean, n, band, date)
     out = write_target(path, lambda content: upsert_rule(content, line), home, dry_run=dry_run)
+    out["line"] = line
     if not dry_run:
         ledger.append_applied(home, {"action": "apply", "id": rule_id, "file": path, "line": line,
-                                     "backup": out["backup"], "result": out["result"], "tracked": False,
-                                     "remote_visibility": None})
+                                     "backup": out["backup"], "result": out["result"],
+                                     "tracked": bool(info and info.get("tracked")),
+                                     "remote_visibility": info.get("visibility") if info else None})
     return out
 
 
@@ -299,3 +301,171 @@ def inspect_target(path: str, cfg: dict, timeout: float = 5.0) -> dict:
         info["visibility"] = "public"
         info["public_mirror"] = True
     return info
+
+
+def _whole_word(word: str, text: str) -> bool:
+    return re.search(r"(?<!\w)%s(?!\w)" % re.escape(word), text, re.IGNORECASE) is not None
+
+
+def sensitive_check(text: str, tracked: bool, repos: List[str], cfg: Optional[dict]) -> Optional[str]:
+    """`sensitive-text:<kind>` when `text` must not be written to the target, else None."""
+    for flag in scrub.scrub(text, cfg)[1]:
+        if flag.startswith("redacted:"):
+            return "sensitive-text:" + flag[len("redacted:"):]
+    if not tracked:
+        return None
+    if scrub.EMAIL_RE.search(text):
+        return "sensitive-text:email"
+    if scrub.TICKET_RE.search(text):
+        return "sensitive-text:ticket"
+    if scrub.UUID_RE.search(text):
+        return "sensitive-text:uuid"
+    for repo in repos:
+        for name in (repo, repo.rsplit("/", 1)[-1]):
+            if name and _whole_word(name, text):
+                return "sensitive-text:repo"
+    return None
+
+
+def resolve_target(scope: str, target: Optional[str], skill: Optional[str], cfg: Optional[dict],
+                   real_home: str) -> Tuple[Optional[str], Optional[str]]:
+    """(path, error) for the `global` and `skill` scopes; a read-only skill falls back to the global target."""
+    from apprentice import scope as scoping  # scope imports this module
+
+    global_path = os.path.realpath(os.path.join(real_home, ".claude", "CLAUDE.md"))
+    if scope == "global":
+        return global_path, None
+    if scope != "skill":
+        return None, "skipped:bad-scope"
+    path = target
+    if not path and skill:
+        directory = scoping.find_skill_dir(skill, real_home)
+        if directory is None:
+            return None, "skipped:skill-not-found"
+        path = os.path.join(directory, "SKILL.md")
+    if not path:
+        return None, "skipped:no-target"
+    if os.path.isdir(path):
+        path = os.path.join(path, "SKILL.md")
+    if scoping.is_readonly_skill(path):
+        return global_path, None
+    return path, None
+
+
+def _outcome(result: str, path: Optional[str] = None, info: Optional[dict] = None, out: Optional[dict] = None) -> dict:
+    out = out or {}
+    return {"result": result, "file": path, "line": out.get("line"), "backup": out.get("backup"),
+            "tracked": bool(info and info.get("tracked")),
+            "remote_visibility": info.get("visibility") if info else None, "diff": out.get("diff")}
+
+
+def _pack_facts(args, home: str, merged_ids: Optional[List[str]]) -> Tuple[int, str, List[str]]:
+    """(n, band, repos) for the candidate (and any merged ones) from the pack and its private sidecar."""
+    if not args.pack:
+        return 0, "manual", []
+    candidates = ledger.pack_candidates(ledger.load_pack(args.pack))
+    private = ledger.read_private(home, args.pack)
+    cand = candidates.get(args.id, {})
+    own = private.get(args.id) if isinstance(private.get(args.id), dict) else {}
+    inputs = cand.get("band_inputs") if isinstance(cand.get("band_inputs"), dict) else {}
+    n = own.get("n") if isinstance(own.get("n"), int) else inputs.get("n")
+    band = cand.get("band")
+    repos = []  # type: List[str]
+    for rule_id in [args.id] + list(merged_ids or []):
+        for repo in candidates.get(rule_id, {}).get("repos") or []:
+            if isinstance(repo, str) and repo not in repos:
+                repos.append(repo)
+    return (n if isinstance(n, int) else 0), (band if isinstance(band, str) and band else "manual"), repos
+
+
+def apply_candidate(args, home: str, cfg: dict, real_home: str, merged_ids: Optional[List[str]] = None) -> dict:
+    """Write one accepted rule to its global or skill target and ledger it."""
+    path, error = resolve_target(args.scope, args.target, getattr(args, "skill", None), cfg, real_home)
+    if error:
+        return _outcome(error)
+    info = inspect_target(path, cfg)
+    if info["tracked"] and not args.confirm_tracked:
+        return _outcome("skipped:git-tracked", path, info)
+    if info["tracked"] and not args.pack:
+        return _outcome("skipped:no-pack", path, info)
+    real = os.path.realpath(path)
+    if os.path.basename(real) == "CLAUDE.md" and info["root"] is not None:
+        global_real = os.path.realpath(os.path.join(real_home, ".claude", "CLAUDE.md"))
+        if info["root"] != _find_repo_root(global_real):
+            return _outcome("skipped:repo-claude-md", path, info)
+    n, band, repos = _pack_facts(args, home, merged_ids)
+    flagged = sensitive_check(args.text, info["tracked"], repos, cfg)
+    if flagged:
+        return _outcome("skipped:" + flagged, path, info)
+    out = apply_rule_to_file(path, args.id, args.text, n, band, config.utc_now_iso()[:10], home,
+                             dry_run=bool(args.dry_run), cfg=cfg, info=info)
+    if not args.dry_run and out["result"] in ("written", "unchanged"):
+        parsed = split_rule_line(out["line"])
+        ledger.record_decision(home, args.pack, args.id, "accepted", text=parsed[0] if parsed else None,
+                               scope=args.scope, target=path, merged_ids=merged_ids,
+                               profile=config.current_profile(os.environ))
+    return _outcome(out["result"], path, info, out)
+
+
+def _last_written(rows: List[dict], rule_id: str, actions: Tuple[str, ...]) -> Optional[dict]:
+    for entry in reversed(rows):
+        if (entry.get("id") == rule_id and entry.get("action") in actions and isinstance(entry.get("file"), str)
+                and entry.get("result") in ("written", "unchanged")):
+            return entry
+    return None
+
+
+def undo(rule_id: str, home: str, cfg: Optional[dict], dry_run: bool = False) -> dict:
+    entry = _last_written(ledger.read_applied(home), rule_id, ("apply", "replay"))
+    if entry is None:
+        return {"result": "skipped:not-applied", "file": None, "backup": None, "diff": None}
+    out = write_target(entry["file"], lambda content: remove_rule(content, rule_id), home, dry_run=dry_run)
+    out["file"] = entry["file"]
+    if not dry_run and out["result"] in ("removed", "unchanged"):
+        ledger.append_applied(home, {"action": "undo", "id": rule_id, "file": entry["file"],
+                                     "backup": out["backup"], "result": out["result"]})
+        ledger.record_decision(home, None, rule_id, "undone", target=entry["file"],
+                               profile=config.current_profile(os.environ))
+    return out
+
+
+def _replay_one(rule_id: str, entry: dict, home: str, cfg: Optional[dict], confirm_tracked: bool,
+                dry_run: bool) -> dict:
+    path, line = entry["file"], entry["line"]
+
+    def transform(content: str) -> Tuple[str, str]:
+        return upsert_rule(content, line)
+
+    probe = write_target(path, transform, home, dry_run=True)
+    out = {"id": rule_id, "file": path, "result": probe["result"], "backup": None, "diff": None}
+    if probe["result"] != "written":
+        return out
+    info = inspect_target(path, cfg or {})
+    if info["tracked"] and not confirm_tracked:
+        out["result"] = "skipped:git-tracked"
+        return out
+    # T28: repo targets run the exclude and index steps here
+    if dry_run:
+        out["diff"] = probe["diff"]
+        return out
+    written = write_target(path, transform, home)
+    out.update(result=written["result"], backup=written["backup"])
+    if written["result"] in ("written", "unchanged"):
+        ledger.append_applied(home, {"action": "replay", "id": rule_id, "file": path, "line": line,
+                                     "backup": written["backup"], "result": written["result"],
+                                     "tracked": info["tracked"], "remote_visibility": info["visibility"]})
+    return out
+
+
+def replay(home: str, cfg: Optional[dict], confirm_tracked: bool, dry_run: bool) -> List[dict]:
+    """Re-insert the stored line of every accepted rule that has gone missing from its file."""
+    applied = ledger.read_applied(home)
+    results = []
+    for rule_id, state in ledger.current_states(ledger.read_proposals(home)).items():
+        if state["decided"].get("status") != "accepted":
+            continue
+        entry = _last_written(applied, rule_id, ("apply", "replay"))
+        if entry is None or not isinstance(entry.get("line"), str):
+            continue
+        results.append(_replay_one(rule_id, entry, home, cfg, confirm_tracked, dry_run))
+    return results
