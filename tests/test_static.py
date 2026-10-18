@@ -115,7 +115,7 @@ class StaticGateTest(unittest.TestCase):
         market = _load(".claude-plugin", "marketplace.json")
         self.assertEqual(plugin["name"], "apprentice")
         self.assertEqual(plugin["version"], "0.1.0")
-        self.assertEqual(market["name"], "claude-apprentice")
+        self.assertEqual(market["name"], "vtrifonov")
         self.assertEqual([p["name"] for p in market["plugins"]], ["apprentice"])
 
     def test_hooks_json(self):

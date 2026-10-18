@@ -14,7 +14,7 @@ if False:  # annotations only
 
 # C1/V13 may change the verb to "enable"; the tests read this constant rather than a literal.
 ENABLE_VERB = "install"
-PLUGIN_KEY = "apprentice@claude-apprentice"
+PLUGIN_KEY = "apprentice@vtrifonov"
 STALE_SECONDS = 24 * 3600
 _TAIL_BYTES = 262144
 _INTERPRETER_RE = re.compile(r"^(\S+) \S+ interpreter-missing")

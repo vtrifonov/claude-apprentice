@@ -1,2 +1,2 @@
-{"name": "claude-apprentice", "owner": {"name": "vtrifonov"},
+{"name": "vtrifonov", "owner": {"name": "vtrifonov"},
  "plugins": [{"name": "apprentice", "source": "./", "description": "Session apprentice: capture, distill, review, apply."}]}

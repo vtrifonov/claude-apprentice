@@ -9,7 +9,7 @@ from tests.base import REPO_ROOT, ApprenticeTestCase
 from tests.fixtures import worktrees as tree_fixture
 
 _SCRIPT = os.path.join(REPO_ROOT, "scripts", "status.py")
-_PLUGIN_KEY = "apprentice@claude-apprentice"
+_PLUGIN_KEY = "apprentice@vtrifonov"
 _HOUR = 3600.0
 
 
