@@ -312,11 +312,16 @@ def _record_apply(home: str, rule_id: str, outcome: dict) -> None:
                                  "remote_visibility": outcome.get("remote_visibility")})
 
 
+def _rule_text(text: str, cfg: Optional[dict], home: str) -> str:
+    """The rule text as written: scrubbed, with emails and UUIDs masked (RT-10) whatever the target."""
+    clean = scrub.scrub(text, cfg if cfg is not None else config.load_config(home))[0] or ""
+    return scrub.mask_outbound(clean)
+
+
 def apply_rule_to_file(path: str, rule_id: str, text: str, n: int, band: str, date: str, home: str,
                        dry_run: bool = False, cfg: Optional[dict] = None, info: Optional[dict] = None,
                        record: bool = True) -> dict:
-    clean = scrub.scrub(text, cfg if cfg is not None else config.load_config(home))[0] or ""
-    line = render_line(rule_id, clean, n, band, date)
+    line = render_line(rule_id, _rule_text(text, cfg, home), n, band, date)
     out = write_target(path, lambda content: upsert_rule(content, line), home, dry_run=dry_run)
     out["line"] = line
     if record and not dry_run:
@@ -570,8 +575,7 @@ def _repo_dry_run(local: str, rule_id: str, text: str, n: int, band: str, date: 
                   cfg: Optional[dict]) -> dict:
     if os.path.lexists(local):
         return apply_rule_to_file(local, rule_id, text, n, band, date, home, dry_run=True, cfg=cfg)
-    clean = scrub.scrub(text, cfg if cfg is not None else config.load_config(home))[0] or ""
-    line = render_line(rule_id, clean, n, band, date)
+    line = render_line(rule_id, _rule_text(text, cfg, home), n, band, date)
     new, result = upsert_rule("", line)
     diff = "".join(difflib.unified_diff([], new.splitlines(True), local, local))
     return {"result": result, "backup": None, "diff": diff, "line": line}

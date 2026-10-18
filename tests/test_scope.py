@@ -165,14 +165,14 @@ class InferScopeTest(ScopeTestCase):
 
 class RepoTargetTest(ScopeTestCase):
     def test_repo_target_deleted_worktree_then_main_resolves(self):
-        found = self.resolver().repo_target([self.trees["gone"], self.trees["wt1"]], "acme/widgets", True)
+        found = self.resolver().repo_target([self.trees["gone"], self.trees["wt1"]], "acme/widgets")
         self.assertEqual(found, {"target": os.path.join(self.trees["main"], "CLAUDE.local.md"),
-                                 "target_status": "resolved", "text_visible": True})
+                                 "target_status": "resolved"})
 
     def test_repo_target_no_checkout(self):
-        found = self.resolver().repo_target([self.trees["wt1"]], "acme/other", False)
-        self.assertEqual(found, {"target": None, "target_status": "no-checkout", "text_visible": False})
-        self.assertEqual(self.resolver().repo_target([], "acme/widgets", True)["target_status"], "no-checkout")
+        found = self.resolver().repo_target([self.trees["wt1"]], "acme/other")
+        self.assertEqual(found, {"target": None, "target_status": "no-checkout"})
+        self.assertEqual(self.resolver().repo_target([], "acme/widgets")["target_status"], "no-checkout")
 
     def test_repo_target_git_tracked_local_recommend_rescope(self):
         with mock.patch.dict(os.environ, {"PATH": self.real_path}):
@@ -181,7 +181,7 @@ class RepoTargetTest(ScopeTestCase):
                 self.skipTest("git not installed")
             config_path = os.path.join(repo, ".git", "config")
             self.write(config_path, '[remote "origin"]\n\turl = https://example.test/acme/widgets.git\n')
-            found = self.resolver().repo_target([repo], "acme/widgets", True)
+            found = self.resolver().repo_target([repo], "acme/widgets")
         self.assertEqual(found["target_status"], "git-tracked-local")
         self.assertIsNone(found["target"])
         self.assertEqual(scope.TargetResolver.recommend(found["target_status"], None), "rescope-global")
@@ -189,7 +189,7 @@ class RepoTargetTest(ScopeTestCase):
     def test_repo_target_unknown_tracking_with_fake_git(self):
         env = dict(self.path_with(self.fake_git_dir()), FAKE_GIT_MODE="exit128")
         with mock.patch.dict(os.environ, env):
-            found = self.resolver().repo_target([self.trees["main"]], "acme/widgets", True)
+            found = self.resolver().repo_target([self.trees["main"]], "acme/widgets")
         self.assertEqual(found["target_status"], "unknown-tracking")
         self.assertIsNone(found["target"])
         self.assertEqual(scope.TargetResolver.recommend("unknown-tracking", None), "rescope-global")
@@ -200,9 +200,9 @@ class RepoTargetTest(ScopeTestCase):
         script = '#!/bin/sh\necho x >> "%s"\nexit 1\n' % counter
         resolver = self.resolver()
         with mock.patch.dict(os.environ, self.path_with(self.fake_git_dir(script))):
-            first = resolver.repo_target([self.trees["wt1"]], "acme/widgets", True)
-            second = resolver.repo_target([self.trees["wt2"]], "acme/widgets", False)
-            resolver.alt_targets("repo", None, {"acme/widgets": [self.trees["wt1"]]}, {"acme/widgets": True})
+            first = resolver.repo_target([self.trees["wt1"]], "acme/widgets")
+            second = resolver.repo_target([self.trees["wt2"]], "acme/widgets")
+            resolver.alt_targets("repo", None, {"acme/widgets": [self.trees["wt1"]]})
         self.assertEqual(first["target_status"], "resolved")
         self.assertEqual(second["target_status"], "resolved")
         with open(counter, "r", encoding="utf-8") as fh:
@@ -287,8 +287,15 @@ class GlobalTargetTest(ScopeTestCase):
         with mock.patch.object(scope.status, "profile_dirs", wraps=scope.status.profile_dirs) as listed:
             resolver.global_target()
             resolver.global_target()
-            resolver.alt_targets("global", None, {}, {})
+            resolver.alt_targets("global", None, {})
         self.assertEqual(listed.call_count, 1)
+
+    def test_global_target_reads_the_profile_from_the_env_it_is_given(self):
+        labels = {"default": "group-1", ".claude-aaa": "group-2", ".claude-bbb": "group-3"}
+        env = {"CLAUDE_CONFIG_DIR": os.path.join(self.fake_home, ".claude-aaa")}
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": os.path.join(self.fake_home, ".claude-bbb")}):
+            found = scope.TargetResolver(self.cfg, self.fake_home, labels, {}, env).global_target()
+        self.assertEqual(found["target_shared_groups"], ["group-1", "group-3"])
 
     def test_global_target_shared_groups_configured_names(self):
         self.cfg = dict(self.cfg, account_groups={"work": [".claude-aaa"], "home": [".claude-bbb", "default"]})
@@ -301,20 +308,19 @@ class AltTargetsTest(ScopeTestCase):
     def test_alt_targets_two_repos_one_no_checkout(self):
         found = self.resolver().alt_targets(
             "repo", None,
-            {"acme/widgets": [self.trees["wt1"]], "acme/other": [self.trees["wt2"]]},
-            {"acme/widgets": True, "acme/other": False})
+            {"acme/widgets": [self.trees["wt1"]], "acme/other": [self.trees["wt2"]]})
         self.assertEqual(sorted(found), ["global", "repo", "skill"])
         self.assertIn("target", found["global"])
         self.assertEqual(sorted(found["repo"]), ["acme/other", "acme/widgets"])
         self.assertEqual(found["repo"]["acme/widgets"]["target_status"], "resolved")
         self.assertEqual(found["repo"]["acme/other"]["target_status"], "no-checkout")
-        self.assertIs(found["repo"]["acme/other"]["text_visible"], False)
+        self.assertEqual(sorted(found["repo"]["acme/other"]), ["target", "target_status"])
 
     def test_alt_targets_skill_none(self):
-        found = self.resolver().alt_targets("global", None, {}, {})
+        found = self.resolver().alt_targets("global", None, {})
         self.assertIsNone(found["skill"])
         self.assertEqual(found["repo"], {})
-        self.assertIsNone(self.resolver().alt_targets("skill", "absent-skill", {}, {})["skill"])
+        self.assertIsNone(self.resolver().alt_targets("skill", "absent-skill", {})["skill"])
 
 
 if __name__ == "__main__":

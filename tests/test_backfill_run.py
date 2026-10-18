@@ -134,6 +134,41 @@ class BackfillRunTest(ApprenticeTestCase):
         paths, _ = backfill.discover(config.load_config(self.home), None, None, os.environ)
         self.assertEqual(sorted(paths), sorted([path, other]))
 
+    def profile(self, name, projects=None):
+        path = os.path.join(self.fake_home, name)
+        self.write(os.path.join(path, "settings.json"), "{}")
+        if projects is not None:
+            os.symlink(projects, os.path.join(path, "projects"))
+        return path
+
+    def test_transcripts_attributed_by_owning_profile_dir(self):
+        common = os.path.join(self.fake_home, "common-projects")
+        self.profile(".claude-work")
+        self.profile(".claude-p1", projects=common)
+        self.profile(".claude-p2", projects=common)
+        self.place("a.jsonl", _line("user", "Please add a widget cache", "2030-01-05T10:00:00Z", "sess-home"))
+        self.place("b.jsonl", _line("user", "Please add a widget index", "2030-01-05T10:01:00Z", "sess-work"),
+                   root=os.path.join(self.fake_home, ".claude-work", "projects"))
+        self.place("c.jsonl", _line("user", "Please add a widget queue", "2030-01-05T10:02:00Z", "sess-shared"),
+                   root=common)
+        self.run_backfill()
+        by_session = {}
+        for event in self.stored():
+            by_session.setdefault(event["session_id"], []).append(event["profile"])
+        self.assertEqual(by_session, {"sess-home": ["default"], "sess-work": [".claude-work"],
+                                      "sess-shared": ["unknown"]})
+
+    def test_shared_dir_still_uses_profile_rules(self):
+        common = os.path.join(self.fake_home, "common-projects")
+        self.profile(".claude-p1", projects=common)
+        self.profile(".claude-p2", projects=common)
+        self.write(os.path.join(self.home, "config.json"),
+                   json.dumps({"profile_rules": [{"cwd_prefix": "/home/alice/code", "profile": ".claude-p1"}]}))
+        self.place("c.jsonl", _line("user", "Please add a widget queue", "2030-01-05T10:02:00Z", "sess-shared"),
+                   root=common)
+        self.run_backfill()
+        self.assertEqual([e["profile"] for e in self.stored()], [".claude-p1"])
+
     def test_since_and_project(self):
         march = time.mktime((2024, 3, 10, 12, 0, 0, 0, 0, -1))
         may = time.mktime((2024, 5, 10, 12, 0, 0, 0, 0, -1))

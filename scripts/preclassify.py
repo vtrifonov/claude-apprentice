@@ -38,8 +38,10 @@ def main(argv) -> int:
     config.ensure_dirs(home_dir)
     found = [event for event in events.iter_events(home_dir)
              if args.since is None or events.month_of(event.get("ts") or "") >= args.since]
-    pairs = preclassify.select_uncached(found, home_dir, config.current_profile(os.environ),
-                                        config.load_config(home_dir))
+    profile = config.current_profile(os.environ)
+    pairs = preclassify.select_uncached(found, home_dir, profile, config.load_config(home_dir))
+    if not pairs and found and not any(preclassify.live_of(event, profile) for event in found):
+        print("no live events for profile %s; backfilled events are never sent" % profile)
     summary = preclassify.run_batches(pairs, home_dir, os.environ, args.max_batches, _log)
     line = "preclassify: %d batches, %d cached, %d skipped" % (summary["batches"], summary["cached"],
                                                               summary["skipped"])

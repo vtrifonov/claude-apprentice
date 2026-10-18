@@ -104,8 +104,7 @@ def _answer_string(answer: Optional[dict]) -> Optional[str]:
     return "|".join(names) if names else None
 
 
-def _ts_key(ts) -> Tuple[float, str]:
-    return (config.ts_epoch(ts) or 0.0, ts or "")
+_ts_key = config.ts_key
 
 
 def _recommended_labels(question: dict) -> Optional[List[str]]:

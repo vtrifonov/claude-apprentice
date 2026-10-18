@@ -14,7 +14,7 @@ from typing import Dict, List, Mapping, Optional, Tuple
 from apprentice import SCHEMA_VERSION, audit, cluster, confidence, config, departures, events, filters, gitinfo
 from apprentice import ledger
 from apprentice import scope as scoping
-from apprentice.scrub import mask_outbound
+from apprentice.scrub import cut_safe, mask_outbound
 
 OBSERVER = "claude-mem-observer"
 WATERMARK_S = 5.0
@@ -36,8 +36,7 @@ RESCOPED_MISSING = "rescoped-skill-not-found"
 TEMPLATE_WITHHELD = "answered in another account group — answers withheld"
 
 
-def _ts_key(ts) -> Tuple[float, str]:
-    return (config.ts_epoch(ts) or 0.0, ts or "")
+_ts_key = config.ts_key
 
 
 def since_epoch(since: Optional[str]) -> Optional[float]:
@@ -56,11 +55,11 @@ def since_epoch(since: Optional[str]) -> Optional[float]:
 
 
 def _is_pasted(event: dict) -> bool:
-    return bool(event.get("pasted")) or "pasted" in (event.get("tags") or [])
+    return "pasted" in (event.get("tags") or [])
 
 
 def _is_image_only(event: dict) -> bool:
-    return bool(event.get("image_only")) or "image_only" in (event.get("tags") or []) or event.get("text") is None
+    return "image_only" in (event.get("tags") or []) or event.get("text") is None
 
 
 def _dropped(event: dict, entrypoints: set, cfg: dict) -> bool:
@@ -141,7 +140,7 @@ def label_profiles(home: str, events_in: List[dict], cfg: dict) -> Dict[str, str
 
 
 def read_preclass(home: str, event_id: Optional[str]) -> Optional[dict]:
-    """The pre-classification verdict T30 caches for one event, or None."""
+    """The cached preclassify verdict for one event (state/preclass/<id>.json), or None."""
     if not isinstance(event_id, str) or not event_id or os.sep in event_id or event_id.startswith("."):
         return None
     try:
@@ -181,8 +180,19 @@ def _known_skill_names(real_home: str) -> List[str]:
     return sorted(names)
 
 
+def _masked(value):
+    """`mask_outbound` over every string in a model-bound pack field; the private sidecar keeps the raw form."""
+    if isinstance(value, str):
+        return mask_outbound(value)
+    if isinstance(value, list):
+        return [_masked(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _masked(item) for key, item in value.items()}
+    return value
+
+
 def _clip(text: str, limit: int) -> str:
-    return mask_outbound(" ".join(text.split()))[:limit]
+    return cut_safe(mask_outbound(" ".join(text.split())), limit)
 
 
 def _quotes(texts_newest_first: List[str]) -> List[str]:
@@ -260,13 +270,13 @@ class _Item(object):
 
 class _Run(object):
     def __init__(self, home: str, cfg: dict, real_home: str, labels: Dict[str, str], now: str,
-                 current_group: Optional[str]) -> None:
+                 current_group: Optional[str], env: Optional[Mapping] = None) -> None:
         self.home = home
         self.cfg = cfg
         self.now = now
         self.current_group = current_group
         self.suffix = cfg.get("worktree_suffix") or ""
-        self.resolver = scoping.TargetResolver(cfg, real_home, labels, {})
+        self.resolver = scoping.TargetResolver(cfg, real_home, labels, {}, env)
         self.skill_names = _known_skill_names(real_home)
         self.mains = {}  # type: Dict[str, Optional[str]]
         self.df = {}  # type: Dict[str, int]
@@ -287,7 +297,7 @@ class _Run(object):
         return out
 
     def targets(self, kind: str, found: dict, scope_name: str, skill_name: Optional[str], items: List[_Item],
-                text_visible: bool, mains: List[str]) -> dict:
+                mains: List[str]) -> dict:
         resolver = self.resolver
         visible_cwds = []  # type: List[str]
         repo_cwds = {}  # type: Dict[str, List[str]]
@@ -314,7 +324,7 @@ class _Run(object):
                 named = resolver.origin(main) if main else None
                 repos = [named] if named else []
             if repos:
-                info = resolver.repo_target(visible_cwds, repos[0], text_visible)
+                info = resolver.repo_target(visible_cwds, repos[0])
                 out.update(target=info["target"], target_status=info["target_status"])
             else:
                 out["target_status"] = "no-checkout"
@@ -324,8 +334,7 @@ class _Run(object):
                        target_git=resolver.global_git())
         out["repos"] = repos
         out["recommend"] = resolver.recommend(out["target_status"], out["target_git"])
-        out["alt_targets"] = resolver.alt_targets(scope_name, skill_name, repo_cwds,
-                                                  {repo: True for repo in repo_cwds})
+        out["alt_targets"] = resolver.alt_targets(scope_name, skill_name, repo_cwds)
         return out
 
     def ledger_outcome(self, record: dict, match: dict, items: List[_Item]) -> str:
@@ -487,11 +496,11 @@ def _split_inputs(found: dict, path: Optional[str]) -> dict:
     split = analysis["majority"] if analysis["majority"] is not None else analysis["recommended"]
     if split is None:
         return {"split": None, "conditional": False, "departure": None, "split_purity": None, "majority_band": None,
-                "departure_rows": analysis.get("departure_rows") or []}
+                "departure_rows": _masked(analysis.get("departure_rows") or [])}
     answered = [row for row in found.get("rows") or [] if departures._row_answer(row) is not None]
     maj_rows = [{"session_id": row.get("session_id"), "repo": row.get("repo")}
                 for row, features in zip(answered, departures.feature_rows(found)) if not _satisfies(split, features)]
-    return {"split": split, "conditional": True, "departure": departures.sentence(split),
+    return {"split": split, "conditional": True, "departure": _masked(departures.sentence(split)),
             "split_purity": split["purity"], "majority_band": confidence.majority_band(maj_rows, path),
             "departure_rows": []}
 
@@ -555,7 +564,7 @@ def build_pack(home: str, env: Mapping, cfg: dict, since: Optional[str], repo: O
     current_group = config.group_of_profile(profile, cfg, labels)
     cleaned = clean(raw, cfg, current_group, labels)
     signal_events = [event for event in cleaned if not event.get("count_only")]
-    run = _Run(home, cfg, real_home, labels, now, current_group)
+    run = _Run(home, cfg, real_home, labels, now, current_group, env)
     run.df = audit.document_frequency(_df_texts(cleaned))
 
     def visible(event: dict) -> bool:
@@ -611,7 +620,7 @@ def build_pack(home: str, env: Mapping, cfg: dict, since: Optional[str], repo: O
         mains = run.evidence_mains(items)
         scope_name, named_skill = scoping.infer_scope("ask", found, cfg, run.skill_names, mains)
         skill_name = found["skill"] or named_skill
-        where = run.targets("ask", found, scope_name, skill_name, items, found["text_visible"], mains)
+        where = run.targets("ask", found, scope_name, skill_name, items, mains)
         if template is not None:
             # only the template phrase, the count and the withheld note: no header, stem, labels, key or answers
             summary = "%s · %d · %s" % (template, found["n"], TEMPLATE_WITHHELD)
@@ -627,8 +636,8 @@ def build_pack(home: str, env: Mapping, cfg: dict, since: Optional[str], repo: O
             rows_newest = sorted(found["rows"], key=lambda row: (_ts_key(row.get("ts")), row.get("event_id") or ""),
                                  reverse=True)
             quotes = _quotes([row["free_text"] for row in rows_newest if row.get("visible") and row.get("free_text")])
-            ask_fields = {"cluster_key": cluster_key, "header": found["header"],
-                          "stem": found["stem"], "labels": found["labels"],
+            ask_fields = {"cluster_key": _masked(cluster_key), "header": _masked(found["header"]),
+                          "stem": _masked(found["stem"]), "labels": _masked(found["labels"]),
                           "display_questions": found["display_questions"], "free_texts": found["free_texts"]}
             shown_split = split
         record = _record("ask", found, items, scope_name, skill_name, where, band_value, band_inputs, shown_split,
@@ -661,7 +670,7 @@ def build_pack(home: str, env: Mapping, cfg: dict, since: Optional[str], repo: O
         band_inputs["assessed"] = confidence.assessed(group)
         mains = run.evidence_mains(items)
         scope_name, skill_name = scoping.infer_scope("correction", group, cfg, run.skill_names, mains)
-        where = run.targets("correction", group, scope_name, skill_name, items, True, mains)
+        where = run.targets("correction", group, scope_name, skill_name, items, mains)
         newest = sorted(visible_pairs, key=lambda pair: (_ts_key(pair.get("ts")), pair["event"].get("id") or ""),
                         reverse=True)
         summary = _clip(newest[0]["event"].get("text") or "", SUMMARY_CHARS)
@@ -854,19 +863,7 @@ def render_markdown(pack: dict) -> str:
 
 
 def _write_file(path: str, text: str) -> None:
-    tmp = "%s.%d.tmp" % (path, os.getpid())
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-    os.replace(tmp, path)
+    config.write_private(path, text.encode("utf-8"))
 
 
 def _next_number(folder: str, day: str) -> int:
@@ -884,7 +881,15 @@ def write_pack(home: str, pack: dict, private: Dict[str, dict]) -> Tuple[str, st
     config.ensure_dirs(home)
     folder = os.path.join(home, "review")
     day = (pack.get("generated_at") or config.utc_now_iso())[:10]
-    base = os.path.join(folder, "%s-%d" % (day, _next_number(folder, day)))
+    number = _next_number(folder, day)
+    while True:
+        base = os.path.join(folder, "%s-%d" % (day, number))
+        try:
+            # claim the name: two runs on one day must not pick the same pack
+            os.close(os.open(base + ".json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+            break
+        except FileExistsError:
+            number += 1
     json_path, md_path = base + ".json", base + ".md"
     ledger.write_private(home, json_path, private)
     _write_file(json_path, json.dumps(pack, ensure_ascii=False, indent=2) + "\n")

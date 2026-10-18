@@ -305,20 +305,23 @@ class EnablementTest(StatusTestBase):
         self.assertNotIn("mem", text)
         self.assertNotIn(".claude-mem", text)
 
-    def test_label_drops_claude_prefix(self):
+    def test_label_is_the_config_profile_name(self):
+        # the name account_groups lists: the directory basename, `default` for ~/.claude
         self.setup_profiles()
         text = self.report()
         self.assertEqual(self.cells(text, "profile")[:2], ["profile", "enabled"])
-        for label in ("default", "acme-alice", "acme-bob"):
+        for label in ("default", ".claude-acme-alice", ".claude-acme-bob"):
             self.cells(text, label)
-        self.assertNotIn("| .claude", text)
+        self.assertNotIn("| acme-alice", text)
+        env = {"CLAUDE_CONFIG_DIR": os.path.join(self.fake_home, ".claude-acme-alice")}
+        self.assertEqual(config.current_profile(env), self.cells(text, ".claude-acme-alice")[0])
 
     def test_enabled_column(self):
         self.setup_profiles(alice_age=0)
         text = self.report()
         self.assertEqual(self.cells(text, "default")[1], "✅")
-        self.assertEqual(self.cells(text, "acme-alice")[1], "⛔ disabled")
-        self.assertEqual(self.cells(text, "acme-bob")[1], "⚪ not installed")
+        self.assertEqual(self.cells(text, ".claude-acme-alice")[1], "⛔ disabled")
+        self.assertEqual(self.cells(text, ".claude-acme-bob")[1], "⚪ not installed")
 
     def test_missing_key_is_not_installed(self):
         self.profile_dir(".claude")
@@ -335,9 +338,9 @@ class EnablementTest(StatusTestBase):
         self.event(profile=".claude-b", ts=_iso(_local(2026, 10, 10, 8, 0)))
         text = self.report(now=now)
         self.assertEqual(self.cells(text, "default")[2], "today 11:51")
-        self.assertEqual(self.cells(text, "a")[2], "yesterday 09:05")
-        self.assertEqual(self.cells(text, "b")[2], "2026-10-10")
-        self.assertEqual(self.cells(text, "c")[2], "—")
+        self.assertEqual(self.cells(text, ".claude-a")[2], "yesterday 09:05")
+        self.assertEqual(self.cells(text, ".claude-b")[2], "2026-10-10")
+        self.assertEqual(self.cells(text, ".claude-c")[2], "—")
 
     def test_flag_column_only_when_a_row_has_a_flag(self):
         self.profile_dir(".claude", enabled=True, transcript_age=0)
@@ -348,7 +351,7 @@ class EnablementTest(StatusTestBase):
         text = self.report()
         self.assertEqual(self.cells(text, "profile")[-1], "flag")
         self.assertEqual(self.cells(text, "default")[-1], "")
-        self.assertEqual(self.cells(text, "late")[-1], "STALE")
+        self.assertEqual(self.cells(text, ".claude-late")[-1], "STALE")
 
     def test_stale_flag(self):
         self.profile_dir(".claude", enabled=True, transcript_age=0)
@@ -377,8 +380,29 @@ class EnablementTest(StatusTestBase):
         text = self.report()
         alice = os.path.join(self.fake_home, ".claude-acme-alice")
         bob = os.path.join(self.fake_home, ".claude-acme-bob")
-        self.assertIn("CLAUDE_CONFIG_DIR=%s claude plugin %s %s" % (alice, status.ENABLE_VERB, _PLUGIN_KEY), text)
-        self.assertIn("CLAUDE_CONFIG_DIR=%s claude plugin %s %s" % (bob, status.ENABLE_VERB, _PLUGIN_KEY), text)
+        # alice has the plugin but disabled: enable; bob lacks it: add the marketplace, then install
+        self.assertIn("CLAUDE_CONFIG_DIR=%s claude plugin enable %s" % (alice, _PLUGIN_KEY), text)
+        self.assertNotIn("CLAUDE_CONFIG_DIR=%s claude plugin install" % alice, text)
+        self.assertNotIn("CLAUDE_CONFIG_DIR=%s claude plugin marketplace add" % alice, text)
+        add = "CLAUDE_CONFIG_DIR=%s claude plugin marketplace add %s" % (bob, status.marketplace_source())
+        install = "CLAUDE_CONFIG_DIR=%s claude plugin install %s" % (bob, _PLUGIN_KEY)
+        lines = self.lines(text)
+        add_at = [i for i, line in enumerate(lines) if line.endswith("`%s`" % add)]
+        install_at = [i for i, line in enumerate(lines) if line.endswith("`%s`" % install)]
+        self.assertEqual(len(add_at), 1)
+        self.assertEqual(install_at, [add_at[0] + 1])
+
+    def test_marketplace_source_is_the_checkout_or_the_github_repo(self):
+        self.assertEqual(status.marketplace_source(), REPO_ROOT)
+        cached = os.path.join(self.fake_home, ".claude", "plugins", "cache", "vtrifonov", "apprentice", "1.0.0")
+        self.assertEqual(status.marketplace_source(cached), status.GITHUB_SOURCE)
+
+    def test_default_profile_missing_plugin_gets_both_lines(self):
+        self.profile_dir(".claude")
+        text = self.report()
+        self.assertIn("1. `env -u CLAUDE_CONFIG_DIR claude plugin marketplace add %s`" % status.marketplace_source(),
+                      text)
+        self.assertIn("2. `env -u CLAUDE_CONFIG_DIR claude plugin install %s`" % _PLUGIN_KEY, text)
         self.assertNotIn("CLAUDE_CONFIG_DIR=%s claude" % os.path.join(self.fake_home, ".claude "), text)
 
     def test_actions_none_when_everything_is_enabled(self):
@@ -415,7 +439,7 @@ class EnablementTest(StatusTestBase):
         text = self.report()
         self.assertNotIn("STALE", text)
         self.assertNotIn("transcripts are shared", text)
-        self.assertEqual(self.cells(text, "acme-bob")[1], "✅")
+        self.assertEqual(self.cells(text, ".claude-acme-bob")[1], "✅")
 
     def test_shared_projects_with_rules_keep_stale_for_idle_profile(self):
         self.profile_dir(".claude", enabled=True)
@@ -431,7 +455,7 @@ class EnablementTest(StatusTestBase):
         self.write(os.path.join(self.home, "config.json"), json.dumps({"profile_rules": [
             {"cwd_prefix": "/home/alice/work", "profile": ".claude-acme-bob"}]}))
         text = self.report()
-        self.assertEqual(self.cells(text, "acme-bob")[-1], "STALE")
+        self.assertEqual(self.cells(text, ".claude-acme-bob")[-1], "STALE")
         self.assertNotIn("transcripts are shared", text)
 
     def test_plugin_enabled(self):
@@ -509,7 +533,7 @@ class SessionStartTest(StatusTestBase):
     def test_not_excluded_shows_exclude_path(self):
         tree = tree_fixture.build(self.fake_home)
         self.write_info(ts="2026-10-10T10:00:00.000Z", cwd=tree["wt1"], link="skipped-not-excluded",
-                        group=None, tone_line=False)
+                        group=None, profile="default", tone_line=False)
         text = self.report()
         exclude = os.path.join(tree["main"], ".git", "info", "exclude")
         found = self.line_with(text, "SessionStart")
@@ -519,6 +543,36 @@ class SessionStartTest(StatusTestBase):
         self.assertIn("CLAUDE.local.md", found[0])
         self.assertTrue(self.line_with(text, ". `echo CLAUDE.local.md >> %s`" % exclude))
         self.assertIn("tone_line: no", self.report(full=True))
+
+    def groups_config(self):
+        self.write(os.path.join(self.home, "config.json"),
+                   json.dumps({"account_groups": {"home": ["default"], "work": [".claude-work"]}}))
+
+    def test_link_problem_of_another_group_shows_no_path(self):
+        tree = tree_fixture.build(self.fake_home)
+        self.groups_config()
+        cases = {"other group": {"group": "work", "profile": ".claude-work"},
+                 "no group recorded": {"profile": "default"},
+                 "both unlabelled, other profile": {"group": None, "profile": ".claude-zed"}}
+        for name, extra in cases.items():
+            if name == "both unlabelled, other profile":
+                self.write(os.path.join(self.home, "config.json"), "{}")
+            self.write_info(ts="2026-10-10T10:00:00.000Z", cwd=tree["wt1"], link="skipped-not-excluded",
+                            tone_line=False, **extra)
+            text = self.report(full=True)
+            found = self.line_with(text, "SessionStart link")
+            self.assertEqual(found, ["SessionStart link: skipped-not-excluded (a session in another account group)"],
+                             name)
+            self.assertNotIn(tree["main"], text, name)
+            self.assertNotIn("echo CLAUDE.local.md", text, name)
+
+    def test_link_problem_of_the_same_group_shows_the_path(self):
+        tree = tree_fixture.build(self.fake_home)
+        self.groups_config()
+        self.write_info(ts="2026-10-10T10:00:00.000Z", cwd=tree["wt1"], link="skipped-not-excluded",
+                        group="home", profile="default", tone_line=False)
+        exclude = os.path.join(tree["main"], ".git", "info", "exclude")
+        self.assertTrue(self.line_with(self.report(), ". `echo CLAUDE.local.md >> %s`" % exclude))
 
     def test_created_is_not_a_problem(self):
         self.write_info(ts="2026-10-10T10:00:00.000Z", cwd=self.fake_home, link="created", group="g",

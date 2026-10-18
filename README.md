@@ -36,7 +36,7 @@ flowchart LR
 
 1. **Capture (always on, silent).** Plugin hooks on `SessionStart`, `UserPromptSubmit`, `PreToolUse` and `PostToolUse` append small JSON events to `~/.claude/apprentice/events/`. They capture:
    - each AskUserQuestion with its options and your answer, including Other text and rejected pickers;
-   - each prompt you type, with the last few hundred characters of Claude's reply before it, so a correction keeps its context.
+   - each prompt you type, with the last 400 characters of Claude's reply before it, so a correction keeps its context.
 
    Text is scrubbed of secrets before it is written. The capture hooks run async, cost about 20 ms on top of Python start-up, and never fail or block a session. `/apprentice:backfill` reads your past transcripts once, so you start with history instead of an empty log.
 2. **Distill (on demand, local).** `/apprentice:suggest` runs a stdlib-only Python pass over the events and builds a review pack:
@@ -46,7 +46,8 @@ flowchart LR
    - Each candidate gets a confidence band (high, medium or low) from its sample size and from how many separate sessions and days back it up.
    - Each candidate also gets a proposed target file.
 3. **Review (you decide).** The `apprentice:distill` skill words each candidate as a short rule in the style of your CLAUDE.md. It shows the evidence and asks one picker: Accept, Decline, Later, or Edit or rescope.
-   - Declined and snoozed candidates stay hidden until enough new evidence arrives, at least three new events.
+   - A declined candidate stays hidden until new evidence arrives: at least three new events, or as many as it had when you declined it, whichever is more.
+   - Later hides a candidate for 14 days from the decision, however much new evidence arrives.
    - Every decision is logged in a ledger.
 4. **Apply (safe writes).** Accepted rules go into a marked `<!-- apprentice:start -->` / `<!-- apprentice:end -->` section, one line per rule, each tagged with a stable id.
    - A backup is taken before every edit.
@@ -57,7 +58,7 @@ flowchart LR
 Two optional extras:
 
 - **`/apprentice:tone`** measures how you write: message length, registers, openers, punctuation, recurring spelling patterns, and an estimated proficiency band. It writes a tone file with real examples. A one-line pointer in your global CLAUDE.md tells Claude to use it when drafting as you or answering you.
-- **`/apprentice:preclassify`** sends correction pairs to haiku, so similar corrections group better. It runs with `--safe-mode`, no tools and no saved session.
+- **`/apprentice:preclassify`** sends correction pairs to haiku, so similar corrections group better. It sends only live-captured prompts of the current profile that distill could use (never pasted, duplicate or backfilled ones). It runs with `--safe-mode`, no tools and no saved session.
 
 ## Requirements
 
@@ -85,7 +86,7 @@ Then, in a new session:
 
 1. `/apprentice:status` checks that capture works and lists any profile still missing the plugin.
 2. `/apprentice:backfill` imports your past transcripts in the background. Check its progress in `/apprentice:status`.
-3. If you use several Claude Code profiles (`CLAUDE_CONFIG_DIR`), decide which ones may see each other's text, and set `account_groups` and `unknown_group` in `~/.claude/apprentice/config.json`. See [Configuration](#configuration). Without `unknown_group`, backfilled text is withheld and packs show counts only.
+3. If you use several Claude Code profiles (`CLAUDE_CONFIG_DIR`), decide which ones may see each other's text, and set `account_groups` and `unknown_group` in `~/.claude/apprentice/config.json`. See [Configuration](#configuration). Backfill reads every profile's `projects/`. Transcripts in a `projects/` directory only one profile uses belong to that profile. Transcripts in a directory several profiles share (through a symlink) are `unknown`, unless `profile_rules` match them. Without `unknown_group`, the text of `unknown` events is withheld and packs show counts only.
 4. `/apprentice:suggest` reviews the first candidates.
 5. Optionally, run `/apprentice:tone` once you have a few hundred prompts.
 
@@ -119,7 +120,7 @@ CLAUDE_CONFIG_DIR=~/.claude-<name> claude plugin marketplace add <path>
 CLAUDE_CONFIG_DIR=~/.claude-<name> claude plugin install apprentice@vtrifonov
 ```
 
-A plain `install` enables the plugin for that profile. `/apprentice:status` lists every profile and prints the exact command for the ones that lack the plugin.
+A plain `install` enables the plugin for that profile. `/apprentice:status` lists every profile by the name `account_groups` uses and prints the exact commands for the ones that lack the plugin: `marketplace add` then `install`, or `claude plugin enable apprentice@vtrifonov` for a profile where the plugin is installed but disabled.
 
 ## Commands
 
@@ -159,11 +160,13 @@ Event fields are in [docs/record-schema.md](docs/record-schema.md), hook input s
 
 ## Privacy
 
-- Stored: AskUserQuestion questions, options and answers; your prompt text (at most 4,000 characters, or 300 for a pasted prompt); and a short assistant text before a correction (at most 400 characters). Nothing else. No tool output, no file contents, no assistant replies.
-- Every free-text field goes through a scrubber before it is written. Add your own regexes (employer, customer, service names) to `extra_redact_patterns`.
+- Stored: AskUserQuestion questions, options and answers; your prompt text; and the end of the assistant text before each prompt (at most 400 characters). Nothing else. No tool output, no file contents, no assistant replies.
+- A typed prompt is stored up to 1,500 characters. A longer prompt, a wrapped paste, or a prompt with three or more quote, code-fence or stack-trace lines counts as pasted: only its first 300 characters are stored, and distill and tone skip it.
+- Every free-text field goes through a scrubber before it is written. The whole text is scrubbed before it is cut to its limit, so a secret that straddles the cut is still caught. Add your own regexes (employer, customer, service names) to `extra_redact_patterns`; they match case-insensitively.
+- Events stored before the scrub-then-cut fix may hold the start of a secret at the end of a cut prompt. `scripts/rescrub.py` re-scrubs the stored events once and replaces such a prompt text whole. It is a dry run that prints counts; `--apply` rewrites the event files. Run it while no session is active.
 - Prompts you did not type are never stored: relayed agent messages, expanded skill bodies, task notifications and usage-limit notes. Add your own with `machine_prompt_patterns`.
 - Counts and aggregates use every profile. Verbatim text enters a review pack or a tone file only from the current account group, so one account's wording never shows up in another's.
-- Emails stay on your machine. Anything that leaves it (preclassify, the review model) has them masked.
+- Emails and UUIDs stay on your machine. Anything that leaves it (preclassify, the review model) has them masked, and so does accepted rule text before apply writes it.
 - Hooks never fail a session: they exit 0, print nothing except the two SessionStart cases, and log one line to `hook-errors.log`.
 
 Rules may land in git-tracked files: a skill's `SKILL.md`, or the global CLAUDE.md when it lives in a git work tree (for example symlinked into a config repo). Apply writes a tracked file only after you confirm it (`--confirm-tracked`), having seen the tracking line and the diff, and never commits it. A repo whose `CLAUDE.local.md` is committed gets no repo rules, because that file would publish them.
@@ -194,15 +197,17 @@ Cost, measured on a quiet machine: the user-prompt hook takes a median 68 ms wit
 
 Real group, profile and employer names never go into a committed file. Keep config.json out of any repo.
 
+A profile name is the profile directory's basename: `default` for `~/.claude`, `.claude-work` for `~/.claude-work`. It is the name in the `/apprentice:status` profile table, and the one to list in `account_groups`.
+
 | Key | Default | Meaning |
 |---|---|---|
-| `account_groups` | `{}` | Group name to the profile names it holds. A profile in no group is its own implicit group with an opaque label `group-<n>`, never its directory name. |
-| `unknown_group` | none | Group that backfilled `unknown` events belong to. Unset means they belong to no group, so their text is withheld from every session. |
-| `profile_rules` | `[]` | Optional. Rules that let backfill assign a profile to a transcript by its working directory. Without them the newest-transcript column in status is global. |
+| `account_groups` | `{}` | Group name to the profile names it holds (`default`, `.claude-work`, …). A profile in no group is its own implicit group with an opaque label `group-<n>`, never its directory name. |
+| `unknown_group` | none | Group that backfilled `unknown` events belong to: transcripts from a `projects/` directory several profiles share. Unset means they belong to no group, so their text is withheld from every session. |
+| `profile_rules` | `[]` | Optional. Rules that let backfill assign a profile to a transcript in a shared `projects/` directory by its working directory. Without them the newest-transcript column in status is global. |
 | `public_skills` | `[]` | Skill directory names whose content you mirror to a public place by hand. Rules for them are treated as public. |
 | `capture_entrypoints` | `["cli", "claude-desktop"]` | Entrypoints the hooks capture. Headless `sdk-cli` sessions are skipped. |
-| `retention_months` | `24` | Event files older than this many months are deleted at session start and skipped by backfill. |
-| `extra_redact_patterns` | `[]` | Extra regexes the scrubber and the apply check treat as sensitive. |
+| `retention_months` | `24` | Event files older than this many months are deleted at session start and skipped by backfill. So are review packs, their private sidecars, preclassify verdicts and backups last modified before that cutoff. The ledger is kept. `0` keeps everything. |
+| `extra_redact_patterns` | `[]` | Extra regexes the scrubber and the apply check treat as sensitive. They match case-insensitively. An entry that does not compile is ignored, logged once a day and counted in `/apprentice:status`. |
 | `machine_prompt_patterns` | `[]` | Extra regexes for prompts you did not type (searched in the stripped prompt text). A match is never stored, and stored matches are skipped by distill, tone and preclassify. Relayed agent messages, skill bodies, task notifications and usage-limit notes are built in. Example: `["^Heartbeat for "]` for prompts a scheduled wakeup replays. |
 | `display_name` | `the user` | Name the tone pointer uses. Set by the `/apprentice:tone` picker while unset; a non-string value counts as unset. |
 | `own_email_domains` | `[]` | Email domains the scrubber treats as your own. |

@@ -6,7 +6,7 @@ import re
 import time
 
 from apprentice import config
-from apprentice.scrub import scrub
+from apprentice.scrub import cut_safe, scrub
 from apprentice.transcript import map_answer
 
 if False:  # annotations only: importing typing or datetime costs every hook start
@@ -129,11 +129,29 @@ def _lookup_answer(answers: Optional[Dict[str, str]], question: str) -> Optional
     return None
 
 
+def _text(value) -> Optional[str]:
+    return value if value is None or isinstance(value, str) else str(value)
+
+
+def _coerced(raw: dict) -> dict:
+    """The question with a non-string header, question, label or description turned into a string, so one
+    oddly typed field never costs the whole ask event."""
+    out = dict(raw)
+    for key in ("header", "question"):
+        out[key] = _text(raw.get(key))
+    options = raw.get("options")
+    if isinstance(options, list):
+        out["options"] = [dict(opt, label=_text(opt.get("label")), description=_text(opt.get("description")))
+                          if isinstance(opt, dict) else opt for opt in options]
+    return out
+
+
 def _build(tool_questions: list, answers: Optional[Dict[str, str]], cfg: dict,
            flags: List[str]) -> Tuple[list, bool]:
     built = []
     partial = False
     for raw in tool_questions:
+        raw = _coerced(raw)
         text = raw.get("question") or ""
         options = []
         for opt in raw.get("options") or []:
@@ -201,5 +219,5 @@ def ask_payload(tool_use_id: str, tool_questions: list, answers: Optional[dict],
     }
     if raw_response is not None:
         raw = raw_response if isinstance(raw_response, str) else json.dumps(raw_response)
-        payload["raw_response"] = (_scrubbed(raw, cfg, flags) or "")[:_RAW_CAP]
+        payload["raw_response"] = cut_safe(_scrubbed(raw, cfg, flags) or "", _RAW_CAP)
     return payload, flags, partial

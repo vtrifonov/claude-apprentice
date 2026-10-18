@@ -54,6 +54,14 @@ class AuditTargetTest(ApprenticeTestCase):
         result = audit.audit_target(_SUMMARY, _fixture("contradicts.md"), True, _DF)
         self.assertEqual(result, "contradicts: - Never touch the panel lane during release.")
 
+    def test_contradicting_quote_masks_email_and_uuid(self):
+        email = "bob" + "@" + "example.test"
+        uuid = "123e4567-e89b-12d3-a456-" + "426614174000"
+        path = self.write(os.path.join(self.fake_home, "CLAUDE.md"),
+                          "- Never touch the panel lane; ask %s about run %s.\n" % (email, uuid))
+        result = audit.audit_target(_SUMMARY, path, True, _DF, {})
+        self.assertEqual(result, "contradicts: - Never touch the panel lane; ask <email> about run <uuid>.")
+
     def test_contradicts_count_only_when_withheld(self):
         result = audit.audit_target(_SUMMARY, _fixture("contradicts.md"), False, _DF)
         self.assertEqual(result, "contradicts: 1 line(s) in a target from other account groups (text withheld)")

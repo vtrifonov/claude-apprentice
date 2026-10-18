@@ -593,19 +593,7 @@ def render_md(profile: dict) -> str:
 
 
 def _write_private(path: str, text: str) -> None:
-    tmp = "%s.%d.tmp" % (path, os.getpid())
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-    os.replace(tmp, path)
+    config.write_private(path, text.encode("utf-8"))
 
 
 def _dump(profile: dict) -> str:

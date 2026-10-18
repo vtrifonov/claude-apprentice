@@ -5,7 +5,7 @@ import re
 import subprocess
 from typing import Callable, Dict, List, Optional
 
-from apprentice import cluster, config, filters, scrub
+from apprentice import cluster, config, distill, scrub
 
 PROMPT_MARKER = "[apprentice-preclassify v1]"
 PROMPT_TEMPLATE = (
@@ -77,23 +77,23 @@ def write_cache(home: str, event_id: str, item: dict, model: str) -> None:
     record = dict(item)
     record["model"] = model
     record["ts"] = config.utc_now_iso()
-    path = cache_path(home, event_id)
-    tmp = "%s.%d.tmp" % (path, os.getpid())
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, json.dumps(record, ensure_ascii=False).encode("utf-8"))
-    finally:
-        os.close(fd)
-    os.replace(tmp, path)
+    config.write_private(cache_path(home, event_id), json.dumps(record, ensure_ascii=False).encode("utf-8"))
+
+
+def live_of(event: dict, profile: str) -> bool:
+    """A live-captured event of `profile`. Backfilled events are never sent, whatever profile they carry."""
+    return event.get("source") == "hook" and event.get("profile") == profile
 
 
 def select_uncached(events: List[dict], home: str, profile: str, cfg: Optional[dict] = None) -> List[dict]:
-    """Pairs of this profile's prompts with no cache file, machine prompts left out. The profile filter runs
-    before the pair limit."""
+    """Pairs of this profile's prompts with no cache file. Only prompts distill can build candidates from are
+    eligible (`distill.clean`: no machine, pasted, image-only, duplicate, observer or other-entrypoint prompts,
+    no backfill copies of live sessions). The profile filter runs before the pair limit."""
     if profile == "unknown":
         return []
-    mine = [event for event in events if event.get("profile") == profile
-            and not (event.get("kind") == "prompt" and filters.is_machine_prompt(event.get("text"), cfg))]
+    cfg = cfg if cfg is not None else config.load_config(home)
+    mine = [event for event in distill.clean(events, cfg, None, {})
+            if live_of(event, profile) and not event.get("count_only")]
     pairs = cluster.select_pairs(mine)
     return [pair for pair in pairs
             if _safe_id(pair["event"].get("id")) and isinstance(pair["event"].get("text"), str)

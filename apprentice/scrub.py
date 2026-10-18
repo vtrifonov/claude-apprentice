@@ -130,7 +130,7 @@ def _extra_patterns(cfg: Optional[dict]) -> list:
         if not isinstance(raw, str):
             continue
         try:
-            out.append(re.compile(raw))
+            out.append(re.compile(raw, re.IGNORECASE))  # config.REDACT_FLAGS, which load_config validates with
         except re.error:
             continue
     return out
@@ -183,3 +183,36 @@ def scrub(text: Optional[str], cfg: Optional[dict] = None) -> Tuple[Optional[str
 
 def mask_outbound(text: str) -> str:
     return EMAIL_RE.sub("<email>", UUID_RE.sub("<uuid>", text))
+
+
+# The placeholders scrub and mask_outbound write. A cut never splits one, so no stored text ends in "<redac".
+_TOKEN_RE = re.compile(r"<(?:redacted(?::[a-z-]+)?|email|uuid)>")
+_TOKEN_MAX = 40
+
+
+def cut_safe(text: str, cap: int) -> str:
+    """`text[:cap]`, moved back to the start of a placeholder the cut would split."""
+    if len(text) <= cap:
+        return text
+    for match in _TOKEN_RE.finditer(text, max(0, cap - _TOKEN_MAX), cap + _TOKEN_MAX):
+        if match.start() < cap < match.end():
+            return text[:match.start()]
+    return text[:cap]
+
+
+def tail_safe(text: str, cap: int) -> str:
+    """`text[-cap:]`, moved forward past a placeholder the cut would split."""
+    if len(text) <= cap:
+        return text
+    start = len(text) - cap
+    for match in _TOKEN_RE.finditer(text, max(0, start - _TOKEN_MAX), start + _TOKEN_MAX):
+        if match.start() < start < match.end():
+            return text[match.end():]
+    return text[start:]
+
+
+def scrub_cut(text: Optional[str], cap: int, cfg: Optional[dict] = None) -> Tuple[Optional[str], List[str]]:
+    """Scrub the whole text, then cut it: a secret straddling the cap is caught before the cut can hide it,
+    and the flags describe the whole text."""
+    out, flags = scrub(text, cfg)
+    return (cut_safe(out, cap) if out is not None else None), flags

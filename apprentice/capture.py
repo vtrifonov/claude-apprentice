@@ -91,21 +91,23 @@ def _labels(question: dict) -> List[str]:
 
 
 def _cut_labels_and_headers(questions: list, cap: int) -> None:
+    from apprentice.scrub import cut_safe
     for q in questions:
         if isinstance(q.get("header"), str):
-            q["header"] = q["header"][:cap]
+            q["header"] = cut_safe(q["header"], cap)
         for opt in q.get("options") or []:
             if isinstance(opt, dict) and isinstance(opt.get("label"), str):
-                opt["label"] = opt["label"][:cap]
+                opt["label"] = cut_safe(opt["label"], cap)
 
 
 def _minimal_marker(marker: dict) -> bytes:
+    from apprentice.scrub import cut_safe
     small = {"tool_use_id": marker.get("tool_use_id"), "ts": marker.get("ts"), "questions": [], "truncated": True}
     budget = MARKER_CAP - len(_encode(small))
     for q in marker["questions"]:
         header = q.get("header")
-        item = {"header": header[:MARKER_MIN_FIELD] if isinstance(header, str) else None,
-                "options": [{"label": label[:MARKER_MIN_FIELD]} for label in _labels(q)]}
+        item = {"header": cut_safe(header, MARKER_MIN_FIELD) if isinstance(header, str) else None,
+                "options": [{"label": cut_safe(label, MARKER_MIN_FIELD)} for label in _labels(q)]}
         # items are joined by ", " in the encoded list
         size = len(_encode(item)) + 2
         if size > budget:
@@ -123,6 +125,7 @@ def _capped_marker(marker: dict) -> bytes:
     data = _encode(marker)
     if len(data) <= MARKER_CAP:
         return data
+    from apprentice.scrub import cut_safe
     marker = json.loads(data)  # a fresh copy to cut down; copy would cost every hook start
     questions = marker["questions"]
     for q in questions:
@@ -138,7 +141,7 @@ def _capped_marker(marker: dict) -> bytes:
             break
         for q in questions:
             if isinstance(q.get("question"), str):
-                q["question"] = q["question"][:cap]
+                q["question"] = cut_safe(q["question"], cap)
         cap //= 2
     _cut_labels_and_headers(questions, MARKER_FIELD_CAP)
     data = _encode(marker)
@@ -148,17 +151,7 @@ def _capped_marker(marker: dict) -> bytes:
 
 
 def _write_atomic(path: str, data: bytes) -> None:
-    tmp = "%s.%d.tmp" % (path, os.getpid())
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        try:
-            os.write(fd, data)
-        finally:
-            os.close(fd)
-        os.replace(tmp, path)
-    except BaseException:
-        _remove(tmp)
-        raise
+    config.write_private(path, data)
 
 
 def _read_marker(path: str) -> Optional[dict]:
@@ -266,20 +259,13 @@ def _check_rejected(payload: dict, env: Mapping, home_dir: str, cfg: dict, entry
     return True
 
 
-def _text_was_cut(event: dict) -> bool:
-    from apprentice import filters
-    tags = event.get("tags")
-    length = event.get("len")
-    return (isinstance(tags, list) and "pasted" in tags) or (isinstance(length, int) and length > filters.TEXT_CAP)
-
-
 def _duplicate_of(record: dict, recent: List[dict], now: float) -> Optional[str]:
     from apprentice import filters
     text = record.get("text")
     if text is None:
         return None
     wanted = filters.normalized_sha1(text)
-    cut = _text_was_cut(record)
+    cut = filters.text_was_cut(record)
     for event in reversed(recent):
         if event.get("kind") != "prompt" or event.get("session_id") == record.get("session_id"):
             continue
@@ -287,7 +273,7 @@ def _duplicate_of(record: dict, recent: List[dict], now: float) -> Optional[str]
         if not isinstance(other, str) or filters.normalized_sha1(other) != wanted:
             continue
         # stored text is a lossy view once cut, so only the raw full-text hash can confirm a match
-        if (cut or _text_was_cut(event)) and event.get("sha1") != record.get("sha1"):
+        if (cut or filters.text_was_cut(event)) and event.get("sha1") != record.get("sha1"):
             continue
         age = _age_seconds(event.get("ts"), now)
         if age is not None and abs(age) <= DUPLICATE_WINDOW_SECONDS:
@@ -297,7 +283,7 @@ def _duplicate_of(record: dict, recent: List[dict], now: float) -> Optional[str]
 
 def handle_user_prompt(payload: dict, env: Mapping, home_dir: str, cfg: dict) -> Optional[str]:
     from apprentice import filters, transcript
-    from apprentice.scrub import scrub
+    from apprentice.scrub import scrub_cut
     path = payload.get("transcript_path")
     prompt = payload.get("prompt")
     if not isinstance(prompt, str):
@@ -319,7 +305,7 @@ def handle_user_prompt(payload: dict, env: Mapping, home_dir: str, cfg: dict) ->
         record["command"] = result["command"]
         events.append_event(home_dir, record)
         return None
-    text, scrub_flags = scrub(result["text"], cfg)
+    text, scrub_flags = scrub_cut(result["full"], result["cap"] or 0, cfg)
     _merge_flags(flags, scrub_flags)
     record = _envelope("prompt", payload, env, entrypoint, flags, prompt)
     record.update({
@@ -365,6 +351,46 @@ def _prune_events(home_dir: str, retention_months: int) -> None:
             _remove(path)
 
 
+# Copies derived from event text: packs, their private sidecars, preclassify verdicts and rules-file backups.
+# They go with the events they came from; the ledger stays.
+_DERIVED_DIRS = (("review",), ("state", "pack-private"), ("state", "preclass"), ("backups",))
+
+
+def _retention_cutoff_epoch(retention_months: int) -> float:
+    index = _utc_month_index() - retention_months
+    return config._days_from_civil(index // 12, index % 12 + 1, 1) * 86400.0
+
+
+def _prune_old_files(folder: str, cutoff: float) -> None:
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return
+    for name in names:
+        path = os.path.join(folder, name)
+        try:
+            st = os.lstat(path)
+        except OSError:
+            continue
+        if os.path.isdir(path) and not os.path.islink(path):
+            _prune_old_files(path, cutoff)
+            if st.st_mtime < cutoff:
+                try:
+                    os.rmdir(path)  # only once emptied
+                except OSError:
+                    pass
+        elif st.st_mtime < cutoff:
+            _remove(path)
+
+
+def _prune_derived(home_dir: str, retention_months: int) -> None:
+    if retention_months <= 0:
+        return
+    cutoff = _retention_cutoff_epoch(retention_months)
+    for parts in _DERIVED_DIRS:
+        _prune_old_files(os.path.join(home_dir, *parts), cutoff)
+
+
 def _truncate_error_log(home_dir: str) -> None:
     path = os.path.join(home_dir, "hook-errors.log")
     try:
@@ -397,33 +423,44 @@ def _prune_markers(home_dir: str) -> None:
             continue
 
 
-def _housekeep(home_dir: str, label: str, step, *args) -> None:
+def _housekeep(home_dir: str, label: str, step, *args, default=None):
     # one failing step must not cost the session its link output or tone line
     try:
-        step(*args)
+        return step(*args)
     except Exception as e:
         config.log_error("session-start", "%s: %s: %s" % (label, type(e).__name__, e), home_dir)
+        return default
+
+
+def _tone_path(home_dir: str, group: Optional[str]) -> Optional[str]:
+    if group is None:
+        return None
+    candidate = os.path.join(home_dir, "profile", "tone-%s.md" % config.group_slug(group))
+    return candidate if os.path.isfile(candidate) else None
+
+
+def _group(home_dir: str, profile: str, cfg: dict) -> Optional[str]:
+    return config.group_of_profile(profile, cfg, config.read_group_labels(home_dir))
 
 
 def handle_session_start(payload: dict, env: Mapping, home_dir: str, cfg: dict) -> Optional[str]:
     from apprentice import worktrees
     _housekeep(home_dir, "ensure-dirs", config.ensure_dirs, home_dir)
     _housekeep(home_dir, "prune-events", _prune_events, home_dir, cfg["retention_months"])
+    _housekeep(home_dir, "prune-derived", _prune_derived, home_dir, cfg["retention_months"])
     _housekeep(home_dir, "truncate-error-log", _truncate_error_log, home_dir)
     _housekeep(home_dir, "prune-markers", _prune_markers, home_dir)
     plugin_root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
     _housekeep(home_dir, "plugin-root", _write_atomic, os.path.join(home_dir, "state", "plugin-root"),
                plugin_root.encode("utf-8"))
     cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) and payload.get("cwd") else os.getcwd()
-    status, content = worktrees.ensure_link(cwd)
-    group = config.group_of_profile(config.current_profile(env), cfg, config.read_group_labels(home_dir))
-    tone_path = None
-    if group is not None:
-        candidate = os.path.join(home_dir, "profile", "tone-%s.md" % config.group_slug(group))
-        if os.path.isfile(candidate):
-            tone_path = candidate
-    info = {"ts": config.utc_now_iso(), "cwd": cwd, "is_worktree": worktrees.is_worktree(cwd),
-            "link": status, "group": group, "tone_line": tone_path is not None}
+    status, content = _housekeep(home_dir, "link", worktrees.ensure_link, cwd, default=(None, None))
+    profile = config.current_profile(env)
+    group = _housekeep(home_dir, "group", _group, home_dir, profile, cfg)
+    tone_path = _housekeep(home_dir, "tone-path", _tone_path, home_dir, group)
+    info = {"ts": config.utc_now_iso(), "cwd": cwd,
+            "is_worktree": _housekeep(home_dir, "is-worktree", worktrees.is_worktree, cwd, default=False),
+            "link": status, "group": group, "profile": profile, "tone_line": tone_path is not None}
     _housekeep(home_dir, "last-sessionstart", _write_atomic, os.path.join(home_dir, "state", "last-sessionstart.json"),
                json.dumps(info).encode("utf-8"))
     out = ""

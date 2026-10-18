@@ -50,6 +50,20 @@ class RenderAndUpsertTest(ApplyTestCase):
         self.assertEqual(result2, "written")
         self.assertEqual(new2, new)
 
+    def test_rule_text_masked_before_write(self):
+        email = "carol" + "@" + "example.test"
+        uuid = "123e4567-e89b-12d3-a456-" + "426614174000"
+        path = self.target("none.md")
+        out = self.apply(path, text="Send reports to %s. Run %s." % (email, uuid))
+        self.assertEqual(out["result"], "written")
+        body = self.read(path)
+        self.assertNotIn(email, body)
+        self.assertNotIn(uuid, body)
+        self.assertIn("Send reports to <email>. Run <uuid>.", body)
+        local = os.path.join(self.project, "CLAUDE.local.md")
+        dry = apply._repo_dry_run(local, R2, "Ask %s first." % email, 3, "high", "2026-10-18", self.home, {})
+        self.assertNotIn(email, dry["line"])
+
     def test_same_text_twice_unchanged_byte_identical(self):
         path = self.target("none.md")
         self.assertEqual(self.apply(path)["result"], "written")

@@ -46,8 +46,9 @@ _DECISION_RE = re.compile(
     r"\b(?:let's|go with|approve|i allow)\b|^q?\d+\s*[-:–>]|^[a-d]\b[\s,)-]")
 _STATUS_RE = _phrases("where are we, what is remaining, any progress, did you, is it running")
 _REPORT_RE = _phrases("merged, closed, done")
-_STRONG_RE = _phrases(
-    "but i said, i thought we, store in your memory, remember to, remember that, from now on")
+STRONG_MARKERS = ("but i said", "i thought we", "store in your memory", "remember to", "remember that",
+                  "from now on")
+_STRONG_RE = _phrases(", ".join(STRONG_MARKERS))
 
 
 def _sha1(text: str) -> str:
@@ -63,7 +64,10 @@ def _paste_lines(text: str) -> int:
 
 
 def _result(outcome: str, text: str, stored: Optional[str], clean: Optional[str] = None, **extra) -> Dict:
-    """`sha1` hashes the raw `text`; `len` and `words` count `clean` when it differs."""
+    """`sha1` hashes the raw `text`; `len` and `words` count `clean` when it differs.
+
+    `text` is the cut, unscrubbed view. Whatever stores a prompt stores `scrub_cut(full, cap)` instead: the
+    whole text is scrubbed before the cut, so a secret straddling the cap cannot survive as a fragment."""
     counted = text if clean is None else clean
     result = {
         "outcome": outcome,
@@ -77,6 +81,8 @@ def _result(outcome: str, text: str, stored: Optional[str], clean: Optional[str]
         "strong_marker": False,
         "pasted": False,
         "image_only": False,
+        "full": None,
+        "cap": None,
     }
     result.update(extra)
     return result
@@ -107,6 +113,13 @@ def _register(tags: List[str], text: str) -> str:
     if text.strip().endswith("?"):
         return "question"
     return "direction"
+
+
+def text_was_cut(event: dict) -> bool:
+    """Whether a stored prompt's `text` is a cut, lossy view of what was typed."""
+    tags = event.get("tags")
+    length = event.get("len")
+    return (isinstance(tags, list) and "pasted" in tags) or (isinstance(length, int) and length > TEXT_CAP)
 
 
 def is_machine_prompt(text: Optional[str], cfg: Optional[dict] = None) -> bool:
@@ -145,11 +158,12 @@ def classify(text: str) -> Dict:
         stripped = text
     pasted = wrapped or len(text) > LONG_TEXT or _paste_lines(text) >= _PASTE_LINES
     if not pasted and _ACK_RE.match(stripped):
-        return _result("prompt", text, text[:TEXT_CAP], register="ack")
+        return _result("prompt", text, text[:TEXT_CAP], register="ack", full=text, cap=TEXT_CAP)
     tags = _tags(stripped[:80].lower())
     if pasted:
         tags = sorted(tags + ["pasted"])
+    cap = PASTED_CAP if pasted else TEXT_CAP
     return _result(
-        "prompt", raw, text[:PASTED_CAP] if pasted else text[:TEXT_CAP], clean=text,
+        "prompt", raw, text[:cap], clean=text,
         tags=tags, register=_register(tags, text), pasted=pasted,
-        strong_marker=bool(_STRONG_RE.search(text.lower())))
+        strong_marker=bool(_STRONG_RE.search(text.lower())), full=text, cap=cap)

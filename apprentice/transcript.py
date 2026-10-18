@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 
-from apprentice.scrub import scrub
+from apprentice.scrub import scrub, tail_safe
 
 if False:  # annotations only: importing typing costs every hook start
     from typing import Dict, Iterator, List, Optional, Tuple
@@ -11,7 +11,7 @@ if False:  # annotations only: importing typing costs every hook start
 PAIR_RE = re.compile(r'"((?:[^"\\]|\\.)*)"="((?:[^"\\]|\\.)*)"')
 
 _ANCHOR_CHARS = 400
-_INTERRUPT_PREFIX = "[Request interrupted by user"
+INTERRUPT_PREFIX = "[Request interrupted by user"
 _RECOMMENDED_RE = re.compile(r"\(recommended\)", re.IGNORECASE)
 _READ_CHUNK = 64 * 1024
 
@@ -55,7 +55,7 @@ def _anchor(text: Optional[str], cfg: Optional[dict] = None) -> Optional[str]:
     clean = scrub(" ".join(text.split()), cfg)[0]
     if not clean:
         return None
-    return clean[-_ANCHOR_CHARS:]
+    return tail_safe(clean, _ANCHOR_CHARS)
 
 
 def tail_context(path: str, current_prompt: Optional[str] = None, nbytes: int = 65536,
@@ -99,7 +99,7 @@ def tail_context(path: str, current_prompt: Optional[str] = None, nbytes: int = 
                 first_user_seen = True
                 if current_prompt is not None and text.strip() == current_prompt.strip():
                     continue
-            ctx["after_interrupt"] = text.startswith(_INTERRUPT_PREFIX)
+            ctx["after_interrupt"] = text.startswith(INTERRUPT_PREFIX)
             have_user = True
     return ctx
 

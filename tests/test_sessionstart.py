@@ -75,7 +75,8 @@ class SessionStartTest(ApprenticeTestCase):
             self.assertEqual(fh.read(), os.path.dirname(os.path.dirname(os.path.realpath(capture.__file__))))
         with open(self.p("state", "last-sessionstart.json"), "r", encoding="utf-8") as fh:
             info = json.load(fh)
-        self.assertEqual(sorted(info), ["cwd", "group", "is_worktree", "link", "tone_line", "ts"])
+        self.assertEqual(sorted(info), ["cwd", "group", "is_worktree", "link", "profile", "tone_line", "ts"])
+        self.assertEqual(info["profile"], "default")
         self.assertEqual(info["cwd"], self.fake_home)
         self.assertEqual(info["link"], "not-a-repo")
         self.assertFalse(info["is_worktree"])
@@ -146,6 +147,61 @@ class SessionStartTest(ApprenticeTestCase):
         lines = self.errors()
         self.assertEqual(len(lines), 6)
         self.assertTrue(all("session-start" in line and "disk full" in line for line in lines))
+
+    def test_retention_prunes_derived_copies_keeps_ledger(self):
+        config.ensure_dirs(self.home)
+        old = time.time() - 40 * 31 * 86400
+        stale = [self.write(self.p("review", "2020-01-01-1.json"), "{}"),
+                 self.write(self.p("review", "2020-01-01-1.md"), "x"),
+                 self.write(self.p("state", "pack-private", "2020-01-01-1.json"), "{}"),
+                 self.write(self.p("state", "preclass", "evt-1.json"), "{}"),
+                 self.write(self.p("backups", "__x__CLAUDE.md", "2020-01-01T00-00-00.bak"), "x")]
+        ledger = self.write(self.p("ledger", "proposals.jsonl"), "{}\n")
+        fresh = [self.write(self.p("review", "2030-01-01-1.json"), "{}"),
+                 self.write(self.p("state", "preclass", "evt-2.json"), "{}"),
+                 self.write(self.p("backups", "__y__CLAUDE.md", "new.bak"), "x")]
+        for path in stale + [ledger]:
+            os.utime(path, (old, old))
+        os.utime(self.p("backups", "__x__CLAUDE.md"), (old, old))
+        self.start(cfg={"retention_months": 24})
+        self.assertEqual([p for p in stale if os.path.exists(p)], [])
+        self.assertFalse(os.path.exists(self.p("backups", "__x__CLAUDE.md")))
+        self.assertTrue(os.path.exists(ledger))
+        self.assertTrue(all(os.path.exists(p) for p in fresh))
+        for name in ("review", "state/pack-private", "state/preclass", "backups"):
+            self.assertTrue(os.path.isdir(self.p(*name.split("/"))), name)
+
+    def test_retention_zero_keeps_derived_copies(self):
+        config.ensure_dirs(self.home)
+        path = self.write(self.p("review", "2020-01-01-1.json"), "{}")
+        old = time.time() - 40 * 31 * 86400
+        os.utime(path, (old, old))
+        self.start(cfg={"retention_months": 0})
+        self.assertTrue(os.path.exists(path))
+
+    def test_link_and_worktree_steps_failing_keep_tone(self):
+        config.ensure_dirs(self.home)
+        self.write(self.p("state", "group-labels.json"), json.dumps({"default": "group-1"}))
+        tone = self.write(self.p("profile", "tone-group-1.md"), "tone\n")
+        boom = OSError("git gone")
+        with mock.patch("apprentice.worktrees.ensure_link", side_effect=boom), \
+                mock.patch("apprentice.worktrees.is_worktree", side_effect=boom):
+            out = self.start()
+        self.assertEqual(out, "apprentice tone file for this session (account group group-1): %s\n" % tone)
+        self.assertEqual(len(self.errors()), 2)
+        with open(self.p("state", "last-sessionstart.json"), "r", encoding="utf-8") as fh:
+            info = json.load(fh)
+        self.assertIsNone(info["link"])
+        self.assertTrue(info["tone_line"])
+
+    def test_group_lookup_failing_keeps_link_output(self):
+        tree = tree_fixture.build(self.fake_home)
+        self.write(os.path.join(tree["main"], _NAME), "# alice rules\n")
+        self.write(os.path.join(tree["main"], ".git", "info", "exclude"), _NAME + "\n")
+        with mock.patch.object(capture.config, "group_of_profile", side_effect=ValueError("bad labels")):
+            out = self.start(cwd=tree["wt1"])
+        self.assertEqual(out, "Personal repo rules from CLAUDE.local.md (linked by apprentice):\n# alice rules\n\n")
+        self.assertEqual(len(self.errors()), 1)
 
     def test_explicit_group_slug(self):
         config.ensure_dirs(self.home)

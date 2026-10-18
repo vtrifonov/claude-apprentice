@@ -13,9 +13,13 @@ from apprentice import config, events, gitinfo
 if False:  # annotations only
     from typing import Dict, List, Mapping, Optional, Tuple
 
-# C1/V13 may change the verb to "enable"; the tests read this constant rather than a literal.
-ENABLE_VERB = "install"
+# A profile without the plugin needs the marketplace (marketplaces are per profile) and then install; a profile
+# whose enabledPlugins entry is false already has it and needs enable.
+INSTALL_VERB = "install"
+ENABLE_VERB = "enable"
 PLUGIN_KEY = "apprentice@vtrifonov"
+GITHUB_SOURCE = "vtrifonov/claude-apprentice"
+_CACHE_PART = os.sep + os.path.join("plugins", "cache") + os.sep
 STALE_SECONDS = 24 * 3600
 RECENT_SECONDS = 7 * 24 * 3600
 MAX_MONTHS = 3
@@ -82,9 +86,19 @@ def _profile_name(path: str) -> str:
     return "default" if base == ".claude" else base
 
 
-def _label(name: str) -> str:
-    prefix = ".claude-"
-    return name[len(prefix):] if name.startswith(prefix) else name
+def marketplace_source(plugin_root: Optional[str] = None) -> str:
+    """What `claude plugin marketplace add` takes for this plugin: the checkout it runs from, or the GitHub repo
+    when it runs from a profile's plugin cache."""
+    root = plugin_root or os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    return GITHUB_SOURCE if _CACHE_PART in root + os.sep else root
+
+
+def _plugin_commands(name: str, path: str, enabled: Optional[bool]) -> List[str]:
+    prefix = "env -u CLAUDE_CONFIG_DIR" if name == "default" else "CLAUDE_CONFIG_DIR=%s" % path
+    if enabled is False:
+        return ["%s claude plugin %s %s" % (prefix, ENABLE_VERB, PLUGIN_KEY)]
+    return ["%s claude plugin marketplace add %s" % (prefix, marketplace_source()),
+            "%s claude plugin %s %s" % (prefix, INSTALL_VERB, PLUGIN_KEY)]
 
 
 def _transcripts(profile_dir: str, seen: set) -> List[tuple]:
@@ -300,10 +314,10 @@ def _profiles(real_home: str, cfg: dict, tally: _Tally, missing: bool, now: floa
                 flag = "STALE"
                 out.stale = out.stale or by_rule is not None
         out.flags.append(flag)
-        out.rows.append([_label(name), _ENABLED_CELL[enabled], _when(live, now)])
+        # the exact profile name account_groups lists
+        out.rows.append([name, _ENABLED_CELL[enabled], _when(live, now)])
         if enabled is not True:
-            prefix = "env -u CLAUDE_CONFIG_DIR" if name == "default" else "CLAUDE_CONFIG_DIR=%s" % path
-            out.commands.append("%s claude plugin %s %s" % (prefix, ENABLE_VERB, PLUGIN_KEY))
+            out.commands.extend(_plugin_commands(name, path, enabled))
     return out
 
 
@@ -403,12 +417,25 @@ def _last_error_note(home_dir: str) -> Optional[str]:
                                            str(last.get("message", ""))[:_LINE_CAP])
 
 
-def _session_start_problem(home_dir: str) -> Tuple[Optional[str], Optional[str]]:
+def _same_group(info: dict, profile: str, group: Optional[str]) -> bool:
+    """Whether the session that wrote last-sessionstart.json is in the current account group. Any profile's
+    session may have written it, and its cwd is that group's verbatim text. Two sessions without a group match
+    only when they are the same profile."""
+    if "group" not in info:
+        return False
+    if group is not None:
+        return info["group"] == group
+    return info["group"] is None and info.get("profile") == profile
+
+
+def _session_start_problem(home_dir: str, profile: str, group: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
     """(note, action) when the last SessionStart link result is an error."""
     info = _read_json(os.path.join(home_dir, "state", "last-sessionstart.json"))
     link = info.get("link") if info is not None else None
     if link not in _LINK_PROBLEMS:
         return None, None
+    if not _same_group(info, profile, group):
+        return "SessionStart link: %s (a session in another account group)" % link, None
     if link != "skipped-not-excluded":
         return "SessionStart link: %s" % link, None
     root = gitinfo.find_git(info["cwd"]) if isinstance(info.get("cwd"), str) else None
@@ -597,7 +624,8 @@ def report(home: str, env: Mapping, home_dir_for_profiles: Optional[str] = None,
     kinds = _kind_table(tally)
     if kinds:
         blocks.append("\n".join(kinds))
-    group = config.group_of_profile(config.current_profile(env), cfg, config.read_group_labels(home))
+    profile = config.current_profile(env)
+    group = config.group_of_profile(profile, cfg, config.read_group_labels(home))
     blocks.append("\n".join(_md_table(["review", "state"], _review_rows(home, now, group))))
     notes = []  # type: List[Optional[str]]
     if profiles.shared:
@@ -606,11 +634,15 @@ def report(home: str, env: Mapping, home_dir_for_profiles: Optional[str] = None,
     notes.append(_backfill_note(home))
     notes.append(_group_note(home, env, cfg, tally))
     notes.append(_last_error_note(home))
-    link_note, link_action = _session_start_problem(home)
+    link_note, link_action = _session_start_problem(home, profile, group)
     notes.append(link_note)
     notes.append(_retention_note(cfg, tally, now))
     if bad:
         notes.append("⚠ %s skipped in the event store" % _plural(bad, "unreadable line"))
+    for key in ("extra_redact_patterns", "machine_prompt_patterns"):
+        ignored = config.ignored_pattern_count(home, key)
+        if ignored:
+            notes.append("⚠ %s: %s ignored" % (key, _plural(ignored, "invalid pattern")))
     blocks.extend(n for n in notes if n)
 
     actions = ["`%s`" % c for c in profiles.commands]

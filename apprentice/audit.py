@@ -82,7 +82,7 @@ def audit_target(summary_text: str, target_path: Optional[str], quote_allowed: b
         return "new"
     if quote_allowed:
         quoted = scrub.scrub(contradicting[0], cfg if cfg is not None else config.load_config())[0] or ""
-        return "contradicts: " + quoted[:QUOTE_MAX]
+        return "contradicts: " + scrub.cut_safe(scrub.mask_outbound(quoted), QUOTE_MAX)
     return "contradicts: %d line(s) in a target from other account groups (text withheld)" % len(contradicting)
 
 
@@ -103,8 +103,7 @@ class LedgerIndex(object):
         return (rule_id, state["decided"]) if state else None
 
 
-def _ts_key(ts) -> Tuple[float, str]:
-    return (config.ts_epoch(ts) or 0.0, ts or "")
+_ts_key = config.ts_key
 
 
 def _kind(cand: dict) -> str:

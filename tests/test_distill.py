@@ -595,6 +595,62 @@ class ReviewB7PrivacyTest(DistillTestCase):
             self.assertIn(".ruff_cache/", fh.read().splitlines())
 
 
+class WritePackTest(DistillTestCase):
+    def test_a_number_taken_meanwhile_is_skipped(self):
+        pack = {"generated_at": "2030-01-05T10:00:00.000Z", "inputs": {}, "candidates": [], "remaining": {}}
+        first, _ = distill.write_pack(self.home, pack, {})
+        # a concurrent run that read the folder before `first` existed picks the same number
+        with mock.patch.object(distill, "_next_number", return_value=1):
+            second, _ = distill.write_pack(self.home, pack, {})
+        self.assertEqual(os.path.basename(first), "2030-01-05-1.json")
+        self.assertEqual(os.path.basename(second), "2030-01-05-2.json")
+        self.assertTrue(os.path.exists(first))
+
+
+class OutboundMaskTest(DistillTestCase):
+    """RT-10: every model-bound pack field has emails and UUIDs masked."""
+
+    def markers(self):
+        domain = "@" + "example" + ".test"
+        uuid = "123e4567-e89b-12d3-a456-" + "426614174000"
+        return "bob" + domain, "carol" + domain, "dave" + domain, uuid
+
+    def assert_masked(self, text, markers):
+        for marker in markers:
+            self.assertNotIn(marker, text)
+        self.assertIn("<email>", text)
+
+    def test_header_stem_labels_key_and_departure_masked(self):
+        bob, carol, dave, uuid = self.markers()
+        labels = [carol + " (Recommended)", dave]
+        rows = [(labels[0], 10), (labels[0], 20), (labels[0], 30), (labels[0], 40), (dave, 90), (dave, 95)]
+        self.add([ask(8 * index, "m-%d" % index, used, picked, option_labels=labels, header="Reviewer " + bob,
+                      question="Send run %s to which reviewer?" % uuid)
+                  for index, (picked, used) in enumerate(rows)])
+        pack, private = self.build(include_all=True)
+        (cand,) = listed(pack)
+        self.assertTrue(cand["departure"])
+        for field in ("header", "stem", "cluster_key", "departure"):
+            self.assert_masked(json.dumps(cand[field]) + "<email>", (bob, carol, dave, uuid))
+        self.assertIn("<email>", cand["header"])
+        self.assertTrue(all("<email>" in label for label in cand["labels"]))
+        self.assert_masked(written(self.home, pack, private), (bob, carol, dave, uuid))
+
+    def test_departure_rows_masked(self):
+        _bob, carol, dave, _uuid = self.markers()
+        labels = [carol + " (Recommended)", dave]
+        picks = [labels[0], dave, labels[0], dave, labels[0], dave, labels[0]]
+        self.add([ask(index, "r-%d" % index, 50, picked, option_labels=labels)
+                  for index, picked in enumerate(picks)])
+        pack, private = self.build(include_all=True)
+        (cand,) = listed(pack)
+        self.assertTrue(cand["departure_rows"] or cand["departure"])
+        text = json.dumps(cand["departure_rows"]) + json.dumps(cand["departure"])
+        self.assertNotIn(carol, text)
+        self.assertNotIn(dave, text)
+        self.assert_masked(written(self.home, pack, private), (carol, dave))
+
+
 class ReviewB7LedgerTest(DistillTestCase):
     def test_accepted_rule_present_at_decided_target_is_covered(self):
         self.add(group("apples bananas cherries", (0, 8, 16), "ac"))

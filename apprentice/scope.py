@@ -9,7 +9,7 @@ import re
 from apprentice import apply, config, gitinfo, lexicon, status
 
 if False:  # annotations only
-    from typing import Dict, List, Optional, Set, Tuple
+    from typing import Dict, List, Mapping, Optional, Set, Tuple
 
 _ARTIFACTS = {}  # type: Dict[str, Set[str]]
 _SKIPPED_DIRS = frozenset(["node_modules", "__pycache__", "dist", "build", "venv", ".venv"])
@@ -136,8 +136,7 @@ def _names_in(text: str, names: List[str]) -> Optional[str]:
     return None
 
 
-def _ts_key(ts) -> Tuple[float, str]:
-    return (config.ts_epoch(ts) or 0.0, ts or "")
+_ts_key = config.ts_key
 
 
 def _visible_text(kind: str, found: dict) -> str:
@@ -180,8 +179,10 @@ def infer_scope(kind: str, cluster_or_group: dict, cfg: dict, known_skill_names:
 
 
 class TargetResolver:
-    def __init__(self, cfg: dict, real_home: str, labels: Dict[str, str], tracked_cache: dict) -> None:
+    def __init__(self, cfg: dict, real_home: str, labels: Dict[str, str], tracked_cache: dict,
+                 env: Optional[Mapping] = None) -> None:
         self.cfg = cfg
+        self.env = env  # the pack build's environment; None reads os.environ
         self.real_home = real_home
         self.labels = labels
         self.tracked_cache = tracked_cache
@@ -201,8 +202,8 @@ class TargetResolver:
             self.tracked_cache[main] = gitinfo.is_tracked(main, _LOCAL_FILE)
         return self.tracked_cache[main]
 
-    def repo_target(self, cwds_newest_first: List[str], repo: str, visible_any: bool) -> dict:
-        result = {"target": None, "target_status": "no-checkout", "text_visible": visible_any}
+    def repo_target(self, cwds_newest_first: List[str], repo: str) -> dict:
+        result = {"target": None, "target_status": "no-checkout"}  # type: Dict[str, Optional[str]]
         suffix = self.cfg.get("worktree_suffix") or ""
         for cwd in cwds_newest_first:
             main = gitinfo.resolve_main_for_cwd(cwd, suffix)
@@ -235,7 +236,7 @@ class TargetResolver:
 
     def global_target(self) -> dict:
         target = os.path.realpath(os.path.join(self.real_home, ".claude", "CLAUDE.md"))
-        current = config.group_of_profile(config.current_profile(), self.cfg, self.labels)
+        current = config.group_of_profile(config.current_profile(self.env), self.cfg, self.labels)
         shared = set()
         if self._profile_dirs is None:
             self._profile_dirs = status.profile_dirs(self.real_home)
@@ -259,10 +260,8 @@ class TargetResolver:
             self._global_git_done = True
         return self._global_git
 
-    def alt_targets(self, candidate_scope: str, skill_name: Optional[str], repo_cwds: Dict[str, List[str]],
-                    repo_visible: Dict[str, bool]) -> dict:
-        repos = {repo: self.repo_target(cwds, repo, bool(repo_visible.get(repo)))
-                 for repo, cwds in sorted(repo_cwds.items())}
+    def alt_targets(self, candidate_scope: str, skill_name: Optional[str], repo_cwds: Dict[str, List[str]]) -> dict:
+        repos = {repo: self.repo_target(cwds, repo) for repo, cwds in sorted(repo_cwds.items())}
         return {"global": dict(self.global_target(), target_git=self.global_git()), "repo": repos,
                 "skill": self.skill_target(skill_name)}
 

@@ -7,6 +7,7 @@ import re
 import time
 
 from apprentice import SCHEMA_VERSION, config
+from apprentice.scrub import cut_safe
 
 if False:  # annotations only: importing typing costs every hook start
     from typing import Callable, Dict, Iterator, List, Optional
@@ -102,13 +103,13 @@ def _drop_option_descriptions(obj: dict) -> None:
 def _truncate_questions(obj: dict) -> None:
     for q in _questions(obj):
         if isinstance(q.get("question"), str):
-            q["question"] = q["question"][:QUESTION_CAP]
+            q["question"] = cut_safe(q["question"], QUESTION_CAP)
     obj["truncated"] = True
 
 
 def _cut(value, str_cap: int, list_cap: Optional[int]):
     if isinstance(value, str):
-        return value[:str_cap]
+        return cut_safe(value, str_cap)
     if isinstance(value, list):
         kept = value if list_cap is None else value[:list_cap]
         return [_cut(v, str_cap, list_cap) for v in kept]

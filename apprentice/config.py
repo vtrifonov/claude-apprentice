@@ -63,8 +63,6 @@ _NUMBER_EXTRACTOR_SOURCES = [
 _RESET_AT_SOURCE = (
     r"\breset(?:s)?\s+(?:at\s+|on\s+)?(\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?(?:\s*[+-]\d{2}:?\d{2}|Z)?)?)")
 PHASE_WORDS = ["shepherd", "checkpoint", "panel", "lane", "quick mode"]
-STRONG_MARKERS = ["but i said", "i thought we", "store in your memory", "remember to",
-                  "remember that", "from now on"]
 
 _RESERVED_GROUP_RE = re.compile(r"^group-\d+$")
 _HINT_FIELDS = ("stem", "header_or_stem", "both")
@@ -104,8 +102,20 @@ def _is_private_dir(path: str) -> bool:
     return stat.S_ISDIR(mode) and stat.S_IMODE(mode) == 0o700
 
 
+def _tighten(path: str, mode: int) -> None:
+    """chmod a file or directory the user owns to `mode` when group or others can reach it; never raises."""
+    try:
+        st = os.stat(path)
+        if st.st_uid == os.getuid() and stat.S_IMODE(st.st_mode) & 0o077:
+            os.chmod(path, mode)
+    except OSError:
+        pass
+
+
 def ensure_dirs(home_dir: str) -> None:
     os.makedirs(home_dir, mode=0o700, exist_ok=True)
+    # a root the user made by hand (to write config.json) starts at 0755
+    _tighten(home_dir, 0o700)
     for sub in _DIRS:
         path = os.path.join(home_dir, sub)
         # every hook calls this: one stat when the tree is already in place instead of mkdir, stat and chmod
@@ -113,6 +123,27 @@ def ensure_dirs(home_dir: str) -> None:
             continue
         os.makedirs(path, mode=0o700, exist_ok=True)
         os.chmod(path, 0o700)
+
+
+def write_private(path: str, data: bytes) -> None:
+    """Write `data` to a 0600 temp file beside `path`, then swap it in; the temp file is removed on any error."""
+    tmp = "%s.%d.tmp" % (path, os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        try:
+            os.fchmod(fd, 0o600)
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def utc_now_iso() -> str:
@@ -148,6 +179,11 @@ def ts_epoch(ts) -> Optional[float]:
     return parsed.timestamp() if parsed is not None else None
 
 
+def ts_key(ts) -> Tuple[float, str]:
+    """Sort key for a timestamp: its epoch (0 when it does not parse), then the raw string."""
+    return (ts_epoch(ts) or 0.0, ts or "")
+
+
 def parse_iso(ts: str) -> Optional[datetime.datetime]:
     import datetime
     try:
@@ -177,13 +213,8 @@ def log_error(event: str, message: str, home_dir: Optional[str] = None) -> None:
             os.close(fd)
         state = os.path.join(base, "state")
         os.makedirs(state, mode=0o700, exist_ok=True)
-        tmp = os.path.join(state, "last-error.json.%d.tmp" % os.getpid())
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            os.write(fd, json.dumps({"ts": ts, "event": event, "message": msg}).encode("utf-8"))
-        finally:
-            os.close(fd)
-        os.replace(tmp, os.path.join(state, "last-error.json"))
+        write_private(os.path.join(state, "last-error.json"),
+                      json.dumps({"ts": ts, "event": event, "message": msg}).encode("utf-8"))
     except Exception:
         pass
 
@@ -250,13 +281,7 @@ def assign_group_labels(home_dir: str, first_seen: Dict[str, str]) -> Dict[str, 
         for profile in fresh:
             highest += 1
             labels[profile] = "group-%d" % highest
-        tmp = os.path.join(state, "group-labels.json.%d.tmp" % os.getpid())
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            os.write(fd, json.dumps(labels, sort_keys=True).encode("utf-8"))
-        finally:
-            os.close(fd)
-        os.replace(tmp, _labels_file(home_dir))
+        write_private(_labels_file(home_dir), json.dumps(labels, sort_keys=True).encode("utf-8"))
         return labels
     finally:
         os.close(lock_fd)
@@ -334,6 +359,7 @@ def load_config(home_dir: Optional[str] = None) -> dict:
     path = os.path.join(base, "config.json")
     if not os.path.exists(path):
         return cfg
+    _tighten(path, 0o600)
     try:
         with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
@@ -371,20 +397,53 @@ def load_config(home_dir: Optional[str] = None) -> dict:
         cfg["capture_entrypoints"] = list(DEFAULTS["capture_entrypoints"])
         _warn_once_per_day(base, "capture_entrypoints invalid (rule: capture-entrypoints)")
 
-    patterns = cfg["machine_prompt_patterns"]
-    valid = [p for p in patterns if isinstance(p, str) and _compiles(p)] if isinstance(patterns, list) else []
-    if not isinstance(patterns, list) or len(valid) != len(patterns):
-        _warn_once_per_day(base, "machine_prompt_patterns: invalid entries ignored (rule: machine-prompt-patterns)")
-    cfg["machine_prompt_patterns"] = valid
+    for key, flags, rule in (("machine_prompt_patterns", 0, "machine-prompt-patterns"),
+                             ("extra_redact_patterns", REDACT_FLAGS, "extra-redact-patterns")):
+        patterns = cfg[key]
+        valid = _valid_patterns(patterns, flags)
+        if not isinstance(patterns, list) or len(valid) != len(patterns):
+            _warn_once_per_day(base, "%s: invalid entries ignored (rule: %s)" % (key, rule))
+        cfg[key] = valid
     return cfg
 
 
-def _compiles(pattern: str) -> bool:
+# extra_redact_patterns match case-insensitively: a name to redact is a name in any case
+REDACT_FLAGS = re.IGNORECASE
+
+
+def _valid_patterns(patterns, flags: int) -> list:
+    """The entries that compile. They compile here with the flags their users pass, inside a warnings filter,
+    so re's cache holds them and a FutureWarning never reaches a hook's stderr."""
+    if not isinstance(patterns, list):
+        return []
+    if not patterns:
+        return []
+    import warnings  # only paid when the user configured patterns
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return [p for p in patterns if isinstance(p, str) and _compiles(p, flags)]
+
+
+def _compiles(pattern: str, flags: int = 0) -> bool:
     try:
-        re.compile(pattern)
+        re.compile(pattern, flags)
     except re.error:
         return False
     return True
+
+
+def ignored_pattern_count(home_dir: str, key: str) -> int:
+    """How many entries of a pattern list in config.json load_config drops as invalid."""
+    try:
+        with open(os.path.join(home_dir, "config.json"), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        return 0
+    raw = data.get(key) if isinstance(data, dict) else None
+    if not isinstance(raw, list):
+        return 0
+    flags = REDACT_FLAGS if key == "extra_redact_patterns" else 0
+    return len(raw) - len(_valid_patterns(raw, flags))
 
 
 def effective_tables(cfg: dict) -> dict:

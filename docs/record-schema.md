@@ -108,7 +108,7 @@ A user prompt.
 
 | Field | Type | Nullable | Source | Notes |
 |---|---|---|---|---|
-| `text` | string | yes | both | Scrubbed prompt text, ≤ 4,000 chars; 300 when `pasted`. Null for `image_only`. |
+| `text` | string | yes | both | Prompt text, scrubbed whole and then cut: ≤ 300 chars when `pasted`, which every prompt over 1,500 chars is, so a typed prompt keeps ≤ 1,500. A cut never splits a `<redacted:…>` placeholder. Null for `image_only`. `<redacted:cut-fragment>` when `scripts/rescrub.py` replaced a pre-fix cut text ending in a secret fragment. |
 | `sha1` | string | no | both | SHA-1 hex of the full raw text, before scrubbing and truncation. |
 | `len` | int | no | both | Length of the full raw text, not the stored text. |
 | `words` | int | no | both | Word count of the full raw text, not the stored text. |

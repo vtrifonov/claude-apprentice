@@ -226,6 +226,33 @@ class PayloadTest(_Base):
         self.assertNotIn("OTHER-MARKER", stdin)
         self.assertNotIn("UNKNOWN-MARKER", stdin)
 
+    def test_only_pairs_distill_can_use_are_selected(self):
+        live = _prompt(50, session_id="sess-live", fidelity="live")
+        copy = _prompt(51, session_id="sess-live", source="backfill", fidelity="transcript", ts=_ts(70),
+                       text="no, BACKFILL-COPY-MARKER")
+        items = [
+            _prompt(1, text="no, PASTED-MARKER", tags=["correction", "pasted"]),
+            _prompt(2, text="no, DUPLICATE-MARKER", duplicate_of="evt-009"),
+            _prompt(3, text="no, SDK-MARKER", entrypoint="sdk-cli"),
+            _prompt(4, text="no, OBSERVER-MARKER", cwd="/home/alice/.claude-mem-observer/x"),
+            _prompt(5, text="<teammate-message>no, MACHINE-MARKER</teammate-message>"),
+            _prompt(6, text="no, KEPT-MARKER"),
+            live, copy,
+        ]
+        todo = preclassify.select_uncached(items, self.home, "default", config.load_config(self.home))
+        self.assertEqual(sorted(p["event"]["id"] for p in todo), ["evt-006", "evt-050"])
+        preclassify.run_batches(todo, self.home, self.env, None, self.log)
+        stdin = self.calls()[0]["stdin"]
+        for marker in ("PASTED", "DUPLICATE", "SDK", "OBSERVER", "MACHINE", "BACKFILL-COPY"):
+            self.assertNotIn(marker + "-MARKER", stdin)
+        self.assertIn("KEPT-MARKER", stdin)
+
+    def test_backfilled_events_of_the_profile_never_selected(self):
+        items = [_prompt(1, source="backfill", fidelity="transcript", text="no, BACKFILLED-MARKER"),
+                 _prompt(2, text="no, LIVE-MARKER")]
+        todo = preclassify.select_uncached(items, self.home, "default", config.load_config(self.home))
+        self.assertEqual([p["event"]["id"] for p in todo], ["evt-002"])
+
     def test_filter_precedes_limit(self):
         items = [_prompt(i, profile="other") for i in range(10, 200)]
         items.append(_prompt(1))
@@ -282,6 +309,17 @@ class ScriptTest(_Base):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), "preclassify: 1 batches, 3 cached, 0 skipped")
         self.assertEqual(len(preclassify.read_cache(self.home)), 3)
+
+    def test_backfill_only_history_says_why_nothing_was_sent(self):
+        for i in range(3):
+            events.append_event(self.home, _prompt(i, profile="unknown" if i else "default", source="backfill",
+                                                   fidelity="transcript"))
+        proc = self.run_script()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip().splitlines(),
+                         ["no live events for profile default; backfilled events are never sent",
+                          "preclassify: 0 batches, 0 cached, 0 skipped"])
+        self.assertEqual(self.calls(), [])
 
     def test_since_filters_months(self):
         events.append_event(self.home, _prompt(1, ts="2029-12-05T10:00:00.000Z"))

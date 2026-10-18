@@ -2,8 +2,9 @@ import json
 import os
 import stat
 import unittest
+from unittest import mock
 
-from apprentice import config
+from apprentice import config, filters
 from tests.base import ApprenticeTestCase
 
 
@@ -220,7 +221,10 @@ class ConfigTest(ApprenticeTestCase):
         self.assertEqual(config.NEGATIONS, ("no", "not", "without"))
         self.assertIn("public api", config.RISK_WORDS)
         self.assertEqual(config.PHASE_WORDS, ["shepherd", "checkpoint", "panel", "lane", "quick mode"])
-        self.assertEqual(len(config.STRONG_MARKERS), 6)
+        self.assertFalse(hasattr(config, "STRONG_MARKERS"))
+        self.assertEqual(len(filters.STRONG_MARKERS), 6)
+        for phrase in filters.STRONG_MARKERS:
+            self.assertTrue(filters.classify("ok so %s keep it" % phrase)["strong_marker"], phrase)
         match = config.RESET_AT_RE.search("resets on 2026-10-20 09:00")
         self.assertEqual(match.group(1), "2026-10-20 09:00")
         match = config.NUMBER_EXTRACTORS[0][0].search("42% of the weekly limit used")
@@ -249,6 +253,56 @@ class ConfigTest(ApprenticeTestCase):
         tables = config.effective_tables(cfg)
         self.assertEqual(len(tables["skill_hints"]), 7)
         self.assertEqual(len(tables["number_extractors"]), 9)
+
+
+class ModesTest(ApprenticeTestCase):
+    def test_ensure_dirs_tightens_an_existing_root(self):
+        root = os.path.join(self.fake_home, "app")
+        os.makedirs(root)
+        os.chmod(root, 0o755)
+        config.ensure_dirs(root)
+        self.assertEqual(stat.S_IMODE(os.stat(root).st_mode), 0o700)
+
+    def test_load_config_tightens_the_config_file(self):
+        path = self.write(os.path.join(self.home, "config.json"), "{}")
+        os.chmod(path, 0o644)
+        config.load_config(self.home)
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+
+    def test_chmod_failure_never_raises(self):
+        root = os.path.join(self.fake_home, "app2")
+        config.ensure_dirs(root)
+        os.chmod(root, 0o755)
+        path = self.write(os.path.join(root, "config.json"), "{}")
+        os.chmod(path, 0o644)
+        with mock.patch.object(config.os, "chmod", side_effect=PermissionError("not yours")):
+            config.ensure_dirs(root)
+            self.assertEqual(config.load_config(root)["retention_months"], 24)
+
+
+class WritePrivateTest(ApprenticeTestCase):
+    def test_replaces_with_a_0600_file(self):
+        path = self.write(os.path.join(self.home, "x.json"), "old")
+        os.chmod(path, 0o644)
+        config.write_private(path, b"new")
+        with open(path, "rb") as fh:
+            self.assertEqual(fh.read(), b"new")
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        self.assertEqual(os.listdir(self.home), ["x.json"])
+
+    def test_stale_tmp_with_open_mode_is_tightened(self):
+        path = os.path.join(self.home, "y.json")
+        tmp = self.write("%s.%d.tmp" % (path, os.getpid()), "stale")
+        os.chmod(tmp, 0o666)
+        config.write_private(path, b"data")
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+
+    def test_failed_replace_leaves_no_tmp(self):
+        target = os.path.join(self.home, "dir")
+        os.makedirs(os.path.join(target, "inner"))
+        with self.assertRaises(OSError):
+            config.write_private(target, b"data")
+        self.assertEqual(sorted(os.listdir(self.home)), ["dir"])
 
 
 if __name__ == "__main__":

@@ -143,6 +143,28 @@ class AsksTest(ApprenticeTestCase):
         self.assertNotIn("partial", flags)
         self.assertFalse(any("partial" in f for f in flags))
 
+    def test_non_string_fields_are_coerced_not_fatal(self):
+        questions = [{"question": 12, "header": 7, "multiSelect": False,
+                      "options": [{"label": 5, "description": 3.5}, {"label": "Six (Recommended)"}]}]
+        payload, _, _ = asks.ask_payload("tu1", questions, {"12": "5"}, None, _cfg(),
+                                         datetime.datetime(2030, 1, 7, 9))
+        (q,) = payload["questions"]
+        self.assertEqual(q["header"], "7")
+        self.assertEqual(q["question"], "12")
+        self.assertEqual([o["label"] for o in q["options"]], ["5", "Six (Recommended)"])
+        self.assertEqual(q["options"][0]["description"], "3.5")
+        self.assertEqual(q["answer"]["labels"], ["5"])
+
+    def test_post_tool_hook_keeps_an_event_with_a_numeric_label(self):
+        from apprentice import capture, events
+        payload = {"session_id": "s1", "cwd": self.home, "transcript_path": "", "tool_use_id": "tu1",
+                   "tool_name": "AskUserQuestion",
+                   "tool_input": {"questions": [{"question": "Pick?", "header": "H", "options": [{"label": 5}]}]},
+                   "tool_response": {"answers": {"Pick?": "5"}}}
+        capture.handle("post-tool", payload, {"APPRENTICE_HOME": self.home, "CLAUDE_CODE_ENTRYPOINT": "cli"})
+        (record,) = list(events.iter_events(self.home))
+        self.assertEqual(record["questions"][0]["options"][0]["label"], "5")
+
     def test_ask_payload_fields_and_raw_cap(self):
         questions = [_q("Use fable? 50% used, 2 working days left", [{"label": "Yes"}], header="Models")]
         when = datetime.datetime(2030, 1, 7, 14, 30)

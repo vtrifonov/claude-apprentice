@@ -163,19 +163,7 @@ def write_private(home_dir: str, pack_json_path: str, mapping: Dict[str, dict]) 
     path = private_path(home_dir, pack_json_path)
     folder = os.path.dirname(path)
     os.makedirs(folder, mode=0o700, exist_ok=True)
-    tmp = "%s.%d.tmp" % (path, os.getpid())
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(mapping, fh, ensure_ascii=False, separators=(",", ":"))
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-    os.replace(tmp, path)
+    config.write_private(path, json.dumps(mapping, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
     return path
 
 

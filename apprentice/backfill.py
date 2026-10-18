@@ -13,8 +13,8 @@ from typing import Callable, Dict, Iterator, List, Optional, Set, Tuple
 
 from apprentice import asks, config, events, filters, gitinfo
 from apprentice.departure import find_ticket
-from apprentice.scrub import scrub
-from apprentice.transcript import LineStream, _anchor, message_text, parse_ask_answer
+from apprentice.scrub import scrub, scrub_cut
+from apprentice.transcript import INTERRUPT_PREFIX, LineStream, _anchor, message_text, parse_ask_answer
 
 CLOCK = time.monotonic
 SAVE_EVERY_FILES = 50
@@ -33,7 +33,6 @@ _USER_RE = re.compile(rb'"type"\s*:\s*"user"')
 _MARKER_RE = re.compile(rb'"(?:content|text)"\s*:\s*"' + re.escape(PRECLASSIFY_MARKER.encode("ascii")))
 LOCK_TRIES = 5
 LOCK_RETRY_SECONDS = 0.02
-_INTERRUPT_PREFIX = "[Request interrupted by user"
 _REJECT_PREFIXES = ("The user doesn't want to proceed", "The user wants to clarify these questions")
 _ASK_TOOL = "AskUserQuestion"
 
@@ -175,7 +174,7 @@ class _Line(object):
     """Per-line context shared by the event builders."""
 
     def __init__(self, obj: dict, path: str, cfg: dict, repo_cache: dict, entrypoint: Optional[str],
-                 emit: bool):
+                 emit: bool, profile: Optional[str] = None):
         self.obj = obj
         self.path = path
         self.cfg = cfg
@@ -185,7 +184,7 @@ class _Line(object):
         cwd = obj.get("cwd")
         self.cwd = cwd if isinstance(cwd, str) else None
         self.branch = obj["gitBranch"] if isinstance(obj.get("gitBranch"), str) and obj["gitBranch"] else None
-        self.profile = _profile_for(self.cwd, cfg)
+        self.profile = profile or _profile_for(self.cwd, cfg)
         self.repo = _repo_for(self.cwd, cfg, repo_cache)
         stem = os.path.splitext(os.path.basename(path))[0]
         sid = obj.get("sessionId")
@@ -233,7 +232,7 @@ def _structured_machine(obj: dict) -> bool:
 
 def _prompt_event(line: _Line, text: str, state: FileState, was_rejected: bool,
                   outcomes: Optional[Dict[str, int]]) -> Optional[dict]:
-    if text.startswith(_INTERRUPT_PREFIX):
+    if text.startswith(INTERRUPT_PREFIX):
         _count(outcomes, "interrupt")
         return None
     if _structured_machine(line.obj) or filters.is_machine_prompt(text, line.cfg):
@@ -247,7 +246,7 @@ def _prompt_event(line: _Line, text: str, state: FileState, was_rejected: bool,
         record = line.envelope("machine", [], text)
         record["command"] = result["command"]
         return record
-    stored, flags = scrub(result["text"], line.cfg)
+    stored, flags = scrub_cut(result["full"], result["cap"] or 0, line.cfg)
     record = line.envelope("prompt", flags, text)
     record.update({
         "text": stored,
@@ -326,7 +325,7 @@ def _handle_user(line: _Line, state: FileState, outcomes: Optional[Dict[str, int
             record = _prompt_event(line, text, state, was_rejected, outcomes)
             if record is not None:
                 out.append(record)
-        state.last_user_interrupt = text.startswith(_INTERRUPT_PREFIX)
+        state.last_user_interrupt = text.startswith(INTERRUPT_PREFIX)
     state.last_user_rejected = rejected_here
     return out
 
@@ -334,9 +333,10 @@ def _handle_user(line: _Line, state: FileState, outcomes: Optional[Dict[str, int
 def extract_file(path: str, state: FileState, cfg: dict, cutoff_ts: Optional[str], since_ts: Optional[str],
                  repo_cache: dict, entrypoint: Optional[str] = None,
                  should_stop: Optional[Callable[[], bool]] = None,
-                 outcomes: Optional[Dict[str, int]] = None) -> Iterator[dict]:
+                 outcomes: Optional[Dict[str, int]] = None, profile: Optional[str] = None) -> Iterator[dict]:
     """Yields the file's events. When should_stop turns true it returns at a line boundary, leaving
-    state.offset after the last line done, so a later run resumes there."""
+    state.offset after the last line done, so a later run resumes there. `profile` is the profile that alone
+    owns the transcript's directory; without one, `profile_rules` or `unknown` apply."""
     floors = [e for e in (config.ts_epoch(cutoff_ts), config.ts_epoch(since_ts)) if e is not None]
     floor = max(floors) if floors else None
     stream = LineStream(path, state.offset)
@@ -353,7 +353,7 @@ def extract_file(path: str, state: FileState, cfg: dict, cutoff_ts: Optional[str
             continue
         epoch = config.ts_epoch(obj.get("timestamp"))
         emit = epoch is not None and (floor is None or epoch >= floor)
-        line = _Line(obj, path, cfg, repo_cache, entrypoint, emit)
+        line = _Line(obj, path, cfg, repo_cache, entrypoint, emit, profile)
         kind = obj.get("type")
         if kind == "assistant":
             _handle_assistant(line, state)
@@ -374,18 +374,29 @@ _SUBAGENTS_DIR = os.sep + "subagents" + os.sep
 _RECENT_PER_TEXT = 20
 
 
-def _project_roots(env) -> List[str]:
+def _project_roots(env) -> List[Tuple[str, Optional[str]]]:
+    """(realpath of a profile's projects/, the profile that alone owns it or None), each realpath once, for
+    every discovered profile plus the current CLAUDE_CONFIG_DIR. A directory several profiles share cannot
+    tell whose a transcript is, so it stays `unknown` (or `profile_rules` decide)."""
+    from apprentice import status
     home_dir = env.get("HOME") or os.path.expanduser("~")
-    candidates = [os.path.join(home_dir, ".claude", "projects")]
+    owners = {}  # type: Dict[str, Set[str]]
+    order = []  # type: List[str]
+    candidates = [(path, status._profile_name(path)) for path in status.profile_dirs(home_dir)]
+    if not candidates:
+        candidates = [(os.path.join(home_dir, ".claude"), "default")]
     config_dir = env.get("CLAUDE_CONFIG_DIR")
     if config_dir:
-        candidates.append(os.path.join(os.path.expanduser(config_dir), "projects"))
-    roots = []  # type: List[str]
-    for root in candidates:
-        real = os.path.realpath(root)
-        if real not in roots and os.path.isdir(real):
-            roots.append(real)
-    return roots
+        candidates.append((os.path.expanduser(config_dir), config.current_profile(env)))
+    for profile_dir, name in candidates:
+        real = os.path.realpath(os.path.join(profile_dir, "projects"))
+        if not os.path.isdir(real):
+            continue
+        if real not in owners:
+            owners[real] = set()
+            order.append(real)
+        owners[real].add(name)
+    return [(real, next(iter(owners[real])) if len(owners[real]) == 1 else None) for real in order]
 
 
 def _month_start(month: str) -> float:
@@ -395,10 +406,11 @@ def _month_start(month: str) -> float:
 
 def discover(cfg: dict, since: Optional[str], project: Optional[str], env) -> Tuple[List[str], dict]:
     stats = {"skipped_subagents": 0, "skipped_observer": 0, "skipped_entrypoint": 0, "skipped_marker": 0,
-             "skipped_since": 0, "entrypoints": {}}  # type: dict
+             "skipped_since": 0, "entrypoints": {}, "profiles": {}}  # type: dict
     floor = _month_start(since) if since else None
     found = []  # type: List[Tuple[float, str]]
-    for root in _project_roots(env):
+    owner_of = {}  # type: Dict[str, Optional[str]]
+    for root, owner in _project_roots(env):
         try:
             slugs = sorted(os.listdir(root))
         except OSError:
@@ -425,6 +437,7 @@ def discover(cfg: dict, since: Optional[str], project: Optional[str], env) -> Tu
                             stats["skipped_since"] += 1
                         else:
                             found.append((mtime, path))
+                            owner_of[path] = owner
     found.sort()
     allowed = cfg.get("capture_entrypoints") or []
     paths = []  # type: List[str]
@@ -436,20 +449,9 @@ def discover(cfg: dict, since: Optional[str], project: Optional[str], env) -> Tu
             stats["skipped_marker"] += 1
         else:
             stats["entrypoints"][path] = entrypoint
+            stats["profiles"][path] = owner_of.get(path)
             paths.append(path)
     return paths, stats
-
-
-def _write_private(path: str, data: bytes) -> None:
-    tmp = "%s.%d.tmp" % (path, os.getpid())
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        view = memoryview(data)
-        while view:
-            view = view[os.write(fd, view):]
-    finally:
-        os.close(fd)
-    os.replace(tmp, path)
 
 
 class Cursor(object):
@@ -502,7 +504,7 @@ class Cursor(object):
     def save(self) -> None:
         os.makedirs(os.path.dirname(self.path), mode=0o700, exist_ok=True)
         data = json.dumps({"v": 1, "files": self.files}, separators=(",", ":"), ensure_ascii=False)
-        _write_private(self.path, data.encode("utf-8", "replace"))
+        config.write_private(self.path, data.encode("utf-8", "replace"))
         self.unsaved = 0
         self.last_save = CLOCK()
 
@@ -514,12 +516,6 @@ class Cursor(object):
 def _next_month(month: str) -> str:
     year, mon = int(month[:4]), int(month[5:7])
     return "%04d-%02d" % (year + mon // 12, mon % 12 + 1)
-
-
-def _text_was_cut(event: dict) -> bool:
-    tags = event.get("tags")
-    length = event.get("len")
-    return (isinstance(tags, list) and "pasted" in tags) or (isinstance(length, int) and length > filters.TEXT_CAP)
 
 
 def _prompt_key(event: dict) -> tuple:
@@ -581,7 +577,7 @@ class DedupIndex(object):
             return
         self._ids.add(event_id)
         bucket = self.recent_prompts.setdefault(filters.normalized_sha1(text), [])
-        bucket.append((event_id, epoch, event.get("session_id"), event.get("sha1"), _text_was_cut(event)))
+        bucket.append((event_id, epoch, event.get("session_id"), event.get("sha1"), filters.text_was_cut(event)))
         del bucket[:-_RECENT_PER_TEXT]
 
     def _drop(self, rule: str) -> bool:
@@ -616,7 +612,7 @@ class DedupIndex(object):
         epoch = config.ts_epoch(event.get("ts"))
         if event.get("kind") != "prompt" or not isinstance(text, str) or epoch is None:
             return None
-        cut = _text_was_cut(event)
+        cut = filters.text_was_cut(event)
         for other_id, other_epoch, other_sid, other_sha1, other_cut in reversed(
                 self.recent_prompts.get(filters.normalized_sha1(text), [])):
             if other_sid == event.get("session_id") or other_epoch is None:
@@ -737,7 +733,7 @@ def _run_locked(args, env, log: Callable[[str], None], home_dir: str, started: f
                 slug = os.path.basename(os.path.dirname(path))
                 for event in extract_file(path, state, cfg, cutoff_ts, since_ts, repo_cache,
                                           entrypoint=stats["entrypoints"].get(path), should_stop=lambda: bool(stop),
-                                          outcomes=outcomes):
+                                          outcomes=outcomes, profile=stats["profiles"].get(path)):
                     if index.accept(event):
                         if event["kind"] == "prompt":
                             event["duplicate_of"] = index.duplicate_of(event)
