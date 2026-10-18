@@ -38,7 +38,7 @@ flowchart LR
    - each AskUserQuestion with its options and your answer, including Other text and rejected pickers;
    - each prompt you type, with the last few hundred characters of Claude's reply before it, so a correction keeps its context.
 
-   Text is scrubbed of secrets before it is written. The capture hooks run async, add about 12 ms, and never fail or block a session. `/apprentice:backfill` reads your past transcripts once, so you start with history instead of an empty log.
+   Text is scrubbed of secrets before it is written. The capture hooks run async, cost about 20 ms on top of Python start-up, and never fail or block a session. `/apprentice:backfill` reads your past transcripts once, so you start with history instead of an empty log.
 2. **Distill (on demand, local).** `/apprentice:suggest` runs a stdlib-only Python pass over the events and builds a review pack:
    - Questions are clustered by their normalized wording. For each cluster it measures how consistently you answer and whether you follow the recommendation.
    - When your answer depends on something, a decision split finds the condition, such as the repo, the weekday or a file count, and the rule is worded conditionally.
@@ -178,7 +178,7 @@ Hooks and scripts run `${APPRENTICE_PYTHON:-/usr/bin/python3}` with `-I -S`. The
 
 On macOS, `/usr/bin/python3` is a stub until the Command Line Tools are installed. Without them the hooks silently stop, and `/apprentice:status` reports "interpreter missing". Fix it with `xcode-select --install`, or point `APPRENTICE_PYTHON` at a Python 3.9+ interpreter.
 
-Cost, measured during a test run on a busy machine: post-tool hook median 56.2 ms against a 44.2 ms bare-interpreter baseline, user-prompt 56.5 ms against 44.7 ms, so about 12 ms per hook on top of Python start-up. Both hooks run async and never block a prompt.
+Cost, measured on a quiet machine: the user-prompt hook takes a median 68 ms with `/usr/bin/python3` (52 ms of it is interpreter start-up) and 55–64 ms with Homebrew Python, whatever the transcript size. Both capture hooks run async and never block a prompt. Details in [docs/follow-ups.md](docs/follow-ups.md).
 
 ## Configuration
 
