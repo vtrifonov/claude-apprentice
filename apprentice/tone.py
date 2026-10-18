@@ -3,17 +3,23 @@
 Group rule: every number is computed over all prompts of every account group. A list entry (opener, n-gram,
 top word, typo) and every example snippet is kept only when it also occurs in a prompt the current group may
 see, so no other group's verbatim text reaches the output. There is no word-frequency list: rarity is
-document frequency over the prompts of this run, and spelling uses the optional system dictionary."""
+document frequency over the prompts of this run, and spelling uses the optional system dictionary.
+
+The profile files are per account group (`profile/tone-<slug>.json` and `.md`); SessionStart names only the
+current group's file, and the global pointer rule tells the session to use that file and no other."""
 from __future__ import annotations
 
+import hashlib
+import json
 import math
+import os
 import re
 import string
 from collections import Counter
-from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
-from apprentice import cluster, config, lexicon
-from apprentice.scrub import mask_outbound
+from apprentice import cluster, config, distill, events, lexicon
+from apprentice.scrub import mask_outbound, scrub
 
 PRECISION = 6
 OPENER_LIMIT = 15
@@ -325,3 +331,340 @@ def select_exemplars(prompts: List[dict], visible: Callable[[dict], bool], n: in
             if remaining[name] and len(chosen) < n:
                 chosen.append(remaining[name].pop(0))
     return chosen[:n], left_out
+
+
+# --- profile files, model, refresh and the pointer rule ---
+
+TONE_POINTER_ID = "r_" + hashlib.sha1(b"tone-pointer").hexdigest()[:8]
+LOW_SAMPLE = 50
+BANDS = ("A1", "A2", "B1", "B2", "C1", "C2")
+JUSTIFICATION_CHARS = 2000
+REASSESS_SHIFT = 0.10
+DISPLAY_NAME_CHARS = 100
+_INPUT_ORDER = ("sentence_len_mean", "clause_density", "rarity_share", "subordination_per_100")
+_DRAFTING = [
+    "Use this when writing text the user will send as their own (chat replies, review comments, ticket notes).",
+    "",
+    "- One to three lowercase lines.",
+    "- Start with the verb, or with \"can you\".",
+    "- One constraint per message, plus a link when there is one.",
+    "- Argue from consistency with what exists or from prod reality, not from preference.",
+    "- No greetings, no thanks, no emoji.",
+    "- No deliberate typos. When quoting the user, keep their typos as written.",
+]
+_TALKING = [
+    "- Answer a status ask in one line.",
+    "- Recommendation first, then the reasons.",
+    "- Plain words at their level (see the proficiency estimate), no process jargon.",
+    "- Never correct or comment on their spelling.",
+]
+
+
+class ToneError(Exception):
+    """A refusal the script reports on stderr with exit `code`."""
+
+    def __init__(self, message: str, code: int = 2):
+        super().__init__(message)
+        self.code = code
+
+
+def pointer_rule_text(display_name: str) -> str:
+    return ("**When drafting text as %s or answering them, follow the apprentice tone file named in this session's "
+            "SessionStart line.** With no such line in context, use no tone file, and never open another "
+            "`tone-*.md` file." % display_name)
+
+
+def profile_paths(home: str, group: str) -> Tuple[str, str]:
+    base = os.path.join(home, "profile", "tone-%s" % config.group_slug(group))
+    return base + ".json", base + ".md"
+
+
+def _current_group(home: str, env: Mapping, cfg: dict) -> Optional[str]:
+    """The current profile's group from the existing labels (read only)."""
+    return config.group_of_profile(config.current_profile(env), cfg, config.read_group_labels(home))
+
+
+def build_profile(home: str, env: Mapping, cfg: dict, real_home: str) -> dict:
+    """The `tone-<group>.json` content for the current profile's account group. Labels profiles like distill does
+    (the two are the only label writers). `real_home` is accepted for symmetry with distill and unused."""
+    raw = list(events.iter_events(home))
+    profile = config.current_profile(env)
+    labels = distill.label_profiles(home, raw, cfg)
+    if profile != "unknown" and profile not in labels and profile not in distill._grouped_profiles(cfg):
+        labels = config.assign_group_labels(home, {profile: config.utc_now_iso()})
+    group = config.group_of_profile(profile, cfg, labels)
+    prompts = eligible_prompts(distill.clean(raw, cfg, group, labels), cfg)
+
+    def visible(prompt: dict) -> bool:
+        return bool(prompt.get("text_visible"))
+
+    exemplars, left_out = select_exemplars(prompts, visible)
+    return {
+        "group": group,
+        "group_profiles": config.group_profiles(group, cfg, labels) if group else [],
+        "unknown_text_used": config.text_visible("unknown", group, cfg, labels),
+        "prompts_group": sum(1 for prompt in prompts if visible(prompt)),
+        "prompts_all": len(prompts),
+        "low_sample": len(prompts) < LOW_SAMPLE,
+        "generated_at": config.utc_now_iso(),
+        "metrics": compute_metrics(prompts, visible, cfg),
+        "exemplars": exemplars,
+        "exemplars_left_out": left_out,
+        "model": {},
+    }
+
+
+def _fmt(value: Any) -> str:
+    if isinstance(value, bool) or value is None:
+        return str(value).lower()
+    if isinstance(value, float):
+        return ("%.2f" % value).rstrip("0").rstrip(".") or "0"
+    return str(value)
+
+
+def _one_line(text: Any) -> str:
+    return " ".join(str(text or "").split())
+
+
+def _ranked_line(entries: List[dict], key: str = "text") -> str:
+    return ", ".join("`%s` (%d)" % (_one_line(entry[key]).replace("`", "'"), entry["count"]) for entry in entries) \
+        or "none"
+
+
+def _table(header: Tuple[str, ...], rows: List[Tuple[Any, ...]]) -> List[str]:
+    out = ["| %s |" % " | ".join(header), "|%s" % ("---|" * len(header))]
+    out.extend("| %s |" % " | ".join(_fmt(cell) for cell in row) for row in rows)
+    return out
+
+
+def _stats(profile: dict) -> List[str]:
+    metrics = profile["metrics"]
+    overall = metrics["length"]["overall"]
+    rows = [
+        ("prompts, all groups", metrics["counts"]["all"]),
+        ("prompts, this group", metrics["counts"]["visible"]),
+        ("words per prompt p50 / p90 / max", "%d / %d / %d" % (overall["p50"], overall["p90"], overall["max"])),
+        ("clauses per prompt", metrics["clauses"]["mean"]),
+        ("run-on share", metrics["clauses"]["run_on_share"]),
+        ("average word length", metrics["avg_word_len"]),
+        ("type-token ratio (first 5,000 words)", metrics["ttr_5000"]),
+    ]
+    return ["## Stats", ""] + _table(("measure", "value"), rows)
+
+
+def _registers_section(metrics: dict) -> List[str]:
+    by_register = metrics["length"]["by_register"]
+    rows = [(name, metrics["counts"]["by_register"].get(name, 0),
+             "%d / %d / %d" % (stats["p50"], stats["p90"], stats["max"]))
+            for name, stats in sorted(by_register.items())]
+    lexicon_rows = sorted(metrics["registers"].items())
+    return (["## Registers", ""] + _table(("register", "prompts", "words p50 / p90 / max"), rows)
+            + ["", "Phrase signals:", ""] + _table(("signal", "prompts"), lexicon_rows))
+
+
+def _vocabulary(metrics: dict) -> List[str]:
+    return ["## Vocabulary and phrases", "",
+            "- Openers: " + _ranked_line(metrics["openers"]),
+            "- Top words: " + _ranked_line(metrics["top_words"]),
+            "- Two-word phrases: " + _ranked_line(metrics["bigrams"]),
+            "- Three-word phrases: " + _ranked_line(metrics["trigrams"])]
+
+
+def _punctuation_section(metrics: dict) -> List[str]:
+    rows = sorted(metrics["punctuation"].items())
+    return ["## Punctuation and casing", ""] + _table(("measure", "value"), rows)
+
+
+def _spelling(metrics: dict) -> List[str]:
+    spelling = metrics["spelling"]
+    out = ["## Spelling and patterns (observed patterns)", "",
+           "Recorded so drafts keep the user's voice, not to correct it.", ""]
+    if spelling["typos"] is None:
+        out.append("- Recurring typos: %s" % spelling["typos_note"])
+    else:
+        out.append("- Recurring typos: " + _ranked_line(spelling["typos"], "word"))
+    for pattern in spelling["patterns"]:
+        examples = "; ".join("`%s`" % _one_line(example).replace("`", "'") for example in pattern["examples"])
+        out.append("- %s: %d%s" % (pattern["name"].replace("_", " "), pattern["count"],
+                                   " (e.g. %s)" % examples if examples else ""))
+    return out
+
+
+def _proficiency(profile: dict) -> List[str]:
+    inputs = profile["metrics"]["proficiency_inputs"]
+    rows = [(name, inputs.get(name)) for name in _INPUT_ORDER]
+    out = ["## Proficiency estimate", ""] + _table(("input", "value"), rows) + [""]
+    model = profile.get("model") or {}
+    if model.get("proficiency_band"):
+        out.append("Estimated band: **%s** (an estimate from the inputs above, not a test result). %s"
+                   % (model["proficiency_band"], _one_line(model.get("proficiency_justification"))))
+    else:
+        out.append("Estimated band: not yet assessed (an estimate, filled in by /apprentice:tone).")
+    if profile.get("reassess_band"):
+        out.extend(["", "The inputs moved more than 10% since the last build: reassess the band."])
+    return out
+
+
+def _exemplars(profile: dict) -> List[str]:
+    out = ["## Exemplars", ""]
+    for entry in profile["exemplars"]:
+        where = ", ".join(part for part in (entry.get("date"), entry.get("repo"), entry.get("register")) if part)
+        out.append("- \"%s\" (%s)" % (_one_line(entry["text"]), where))
+    if not profile["exemplars"]:
+        out.append("No exemplars from this account group.")
+    if profile.get("exemplars_left_out"):
+        out.extend(["", "%d prompts from other account groups left out (text withheld)."
+                    % profile["exemplars_left_out"]])
+    return out
+
+
+def render_md(profile: dict) -> str:
+    out = ["# Writing profile: account group %s" % (profile.get("group") or "none"), ""]
+    if profile.get("low_sample"):
+        out.extend(["> **Low sample:** %d prompts across all groups (under %d). Treat every number as rough."
+                    % (profile["prompts_all"], LOW_SAMPLE), ""])
+    if profile.get("group_profiles"):
+        out.append("Profiles in this group: %s." % ", ".join(profile["group_profiles"]))
+    out.append("Generated %s from %d prompts in this group and %d across all groups. Numbers use every group; "
+               "text comes only from this group." % (profile.get("generated_at"), profile["prompts_group"],
+                                                      profile["prompts_all"]))
+    if not profile["prompts_group"]:
+        out.append("No prompts from this account group are visible: add this profile to `account_groups`, or set "
+                   "`unknown_group` for backfilled prompts, in config.json.")
+    metrics = profile["metrics"]
+    for section in (_stats(profile), _registers_section(metrics), _vocabulary(metrics),
+                    _punctuation_section(metrics), _spelling(metrics), _proficiency(profile), _exemplars(profile)):
+        out.append("")
+        out.extend(section)
+    prose = (profile.get("model") or {}).get("prose")
+    if prose:
+        out.extend(["", "## How to use", "", prose.strip()])
+    else:
+        out.extend(["", "## How to use: drafting as the user", ""] + _DRAFTING)
+        out.extend(["", "## How to use: talking to the user", ""] + _TALKING)
+    return "\n".join(out) + "\n"
+
+
+def _write_private(path: str, text: str) -> None:
+    tmp = "%s.%d.tmp" % (path, os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    os.replace(tmp, path)
+
+
+def _dump(profile: dict) -> str:
+    return json.dumps(profile, ensure_ascii=False, indent=2) + "\n"
+
+
+def write_profile(home: str, profile: dict) -> Tuple[str, str]:
+    """Write `profile/tone-<slug>.json` then `.md`; return both paths."""
+    if not profile.get("group"):
+        raise ToneError("no account group for the current profile (state/group-labels.json unreadable?)")
+    config.ensure_dirs(home)
+    json_path, md_path = profile_paths(home, profile["group"])
+    _write_private(json_path, _dump(profile))
+    _write_private(md_path, render_md(profile))
+    return json_path, md_path
+
+
+def _load_json(path: str, what: str) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise ToneError("cannot read %s %s: %s" % (what, path, exc.__class__.__name__))
+    if not isinstance(data, dict):
+        raise ToneError("%s %s is not a JSON object" % (what, path))
+    return data
+
+
+def _validated_model(data: dict, cfg: dict) -> dict:
+    band = data.get("proficiency_band")
+    if band not in BANDS:
+        raise ToneError("proficiency_band must be one of %s" % ", ".join(BANDS))
+    justification = data.get("proficiency_justification")
+    if not isinstance(justification, str) or not justification.strip():
+        raise ToneError("proficiency_justification must be a non-empty string")
+    if len(justification) > JUSTIFICATION_CHARS:
+        raise ToneError("proficiency_justification is over %d characters" % JUSTIFICATION_CHARS)
+    prose = data.get("prose")
+    if prose is not None and not isinstance(prose, str):
+        raise ToneError("prose must be a string")
+    model = {"proficiency_band": band, "proficiency_justification": scrub(justification, cfg)[0]}
+    if prose and prose.strip():
+        model["prose"] = scrub(prose, cfg)[0]
+    return model
+
+
+def set_model(home: str, env: Mapping, cfg: dict, model_file: str) -> dict:
+    """Store the model's band, justification and optional prose in the current group's JSON (every other key is
+    left as it is, and any other key in `model_file` is ignored), then re-render the markdown."""
+    group = _current_group(home, env, cfg)
+    if not group:
+        raise ToneError("no account group for the current profile: run tone.py without flags first")
+    json_path, md_path = profile_paths(home, group)
+    if not os.path.exists(json_path):
+        raise ToneError("no tone profile for account group %s: run tone.py without flags first" % group)
+    model = _validated_model(_load_json(model_file, "model file"), cfg)
+    profile = _load_json(json_path, "tone profile")
+    profile["model"] = model
+    _write_private(json_path, _dump(profile))
+    _write_private(md_path, render_md(profile))
+    return profile
+
+
+def _moved(old: Any, new: Any) -> bool:
+    if not isinstance(old, (int, float)) or not isinstance(new, (int, float)):
+        return old != new
+    if old == 0:
+        return new != 0
+    return abs(new - old) > REASSESS_SHIFT * abs(old)
+
+
+def refresh(home: str, env: Mapping, cfg: dict, real_home: str) -> dict:
+    """Recompute the profile, keep the previous `model`, and set `reassess_band` when any proficiency input moved
+    by more than 10% relative to the previous build."""
+    profile = build_profile(home, env, cfg, real_home)
+    previous = {}  # type: Dict[str, Any]
+    if profile["group"]:
+        json_path = profile_paths(home, profile["group"])[0]
+        if os.path.exists(json_path):
+            previous = _load_json(json_path, "tone profile")
+    profile["model"] = previous.get("model") if isinstance(previous.get("model"), dict) else {}
+    old_inputs = ((previous.get("metrics") or {}).get("proficiency_inputs") or {}) if previous else {}
+    new_inputs = profile["metrics"]["proficiency_inputs"]
+    profile["reassess_band"] = bool(old_inputs) and any(_moved(old_inputs.get(name), new_inputs.get(name))
+                                                        for name in new_inputs)
+    return profile
+
+
+def display_name_set(home: str) -> bool:
+    """True when config.json itself names a display_name (the default "the user" does not count)."""
+    try:
+        with open(os.path.join(home, "config.json"), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and isinstance(data.get("display_name"), str) and bool(data["display_name"].strip())
+
+
+def set_display_name(home: str, name: str) -> dict:
+    """Merge `display_name` into config.json (temp file and replace); refuses a malformed config.json."""
+    clean = (name or "").strip()
+    if not clean or "\n" in clean or "\r" in clean or len(clean) > DISPLAY_NAME_CHARS:
+        raise ToneError("display name must be one non-empty line of at most %d characters" % DISPLAY_NAME_CHARS)
+    os.makedirs(home, mode=0o700, exist_ok=True)
+    path = os.path.join(home, "config.json")
+    data = _load_json(path, "config") if os.path.exists(path) else {}
+    data["display_name"] = clean
+    _write_private(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    return data
