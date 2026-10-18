@@ -155,6 +155,15 @@ class BackfillTest(ApprenticeTestCase):
         self.assertIn("pasted", events[0]["tags"])
         self.assertLessEqual(len(events[0]["text"]), 300)
 
+    def test_pasted_wrapper_stripped_from_stored_text(self):
+        wrapped = '\n\n<pasted_content id="3fa9c1d2">\nstack trace line\n</pasted_content id="3fa9c1d2">'
+        path = self.tmp_transcript("wrap.jsonl", _line("user", "why does this fail" + wrapped, "2030-01-05T10:00:00Z"))
+        event = self.run_file(path)[0][0]
+        self.assertEqual(event["kind"], "prompt")
+        self.assertIn("pasted", event["tags"])
+        self.assertNotIn("pasted_content", event["text"])
+        self.assertIn("why does this fail", event["text"])
+
     def test_image_only(self):
         path = self.tmp_transcript("img.jsonl", _line("user", "[Image #1]", "2030-01-05T10:00:00Z"))
         event = self.run_file(path)[0][0]

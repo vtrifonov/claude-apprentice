@@ -1,6 +1,7 @@
-"""Plain-text status report: capture counts, backfill state, account groups and per-profile enablement."""
+"""Markdown status report: a health verdict, a profile table, a kinds table, conditional notes and actions."""
 from __future__ import annotations
 
+import datetime
 import fcntl
 import json
 import os
@@ -10,18 +11,24 @@ import time
 from apprentice import config, events, gitinfo
 
 if False:  # annotations only
-    from typing import Dict, List, Mapping, Optional
+    from typing import Dict, List, Mapping, Optional, Tuple
 
 # C1/V13 may change the verb to "enable"; the tests read this constant rather than a literal.
 ENABLE_VERB = "install"
 PLUGIN_KEY = "apprentice@vtrifonov"
 STALE_SECONDS = 24 * 3600
+RECENT_SECONDS = 7 * 24 * 3600
+MAX_MONTHS = 3
 _TAIL_BYTES = 262144
 _INTERPRETER_RE = re.compile(r"^(\S+) \S+ interpreter-missing")
 _SKIPPED_RE = re.compile(r"skipped \(([^)]*)\)")
+_KINDS_RE = re.compile(r"events by kind \(([^)]*)\)")
 _LOCAL_NAME = "CLAUDE.local.md"
 _LINE_CAP = 300
-_MEM_DIR = ".claude-mem"
+_KIND_LABELS = {"machine": "command", "ask_rejected": "ask rejected"}
+_ENABLED_CELL = {True: "✅", False: "⛔ disabled", None: "⚪ not installed"}
+_LINK_PROBLEMS = ("skipped-not-excluded", "skipped-file-exists", "no-main-checkout")
+_PYTHON_REMEDY = "`xcode-select --install` (or set `APPRENTICE_PYTHON` to a Python 3.9 or newer interpreter)"
 
 
 def _read_tail(path: str, nbytes: int = _TAIL_BYTES) -> Optional[str]:
@@ -44,13 +51,9 @@ def _read_json(path: str) -> Optional[dict]:
     return data if isinstance(data, dict) else None
 
 
-def _iso(epoch: float) -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
-
-
 def profile_dirs(real_home: str) -> List[str]:
-    """`~/.claude` (always), `~/.claude-mem`, and every `~/.claude-*` directory that holds a settings.json
-    and either a projects/ directory or a .claude.json."""
+    """`~/.claude` (always) and every `~/.claude-*` directory that holds a settings.json and either a
+    projects/ directory or a .claude.json. Data directories such as `~/.claude-mem` fail that test."""
     try:
         names = sorted(os.listdir(real_home))
     except OSError:
@@ -59,7 +62,7 @@ def profile_dirs(real_home: str) -> List[str]:
     for name in names:
         path = os.path.join(real_home, name)
         if name.startswith(".claude-") and os.path.isfile(os.path.join(path, "settings.json")):
-            if name == _MEM_DIR or os.path.isdir(os.path.join(path, "projects")) \
+            if os.path.isdir(os.path.join(path, "projects")) \
                     or os.path.isfile(os.path.join(path, ".claude.json")):
                 out.append(path)
     return out
@@ -77,6 +80,11 @@ def plugin_enabled(settings_path: str) -> Optional[bool]:
 def _profile_name(path: str) -> str:
     base = os.path.basename(path.rstrip("/"))
     return "default" if base == ".claude" else base
+
+
+def _label(name: str) -> str:
+    prefix = ".claude-"
+    return name[len(prefix):] if name.startswith(prefix) else name
 
 
 def _transcripts(profile_dir: str, seen: set) -> List[tuple]:
@@ -136,6 +144,11 @@ def _newest_transcript_by_rule(dirs: List[str], cfg: dict) -> Dict[str, float]:
     return newest
 
 
+def _newest_transcript_any(dirs: List[str]) -> Optional[float]:
+    seen = set()  # type: set
+    return max((mtime for d in dirs for _path, mtime in _transcripts(d, seen)), default=None)
+
+
 def _interpreter_missing_ts(home_dir: str) -> Optional[str]:
     text = _read_tail(os.path.join(home_dir, "hook-errors.log"))
     if text is None:
@@ -150,6 +163,17 @@ def _interpreter_missing_ts(home_dir: str) -> Optional[str]:
         if epoch is not None and (newest_epoch is None or epoch > newest_epoch):
             newest, newest_epoch = match.group(1), epoch
     return newest
+
+
+def _recent_errors(home_dir: str, now: float) -> int:
+    """hook-errors.log lines stamped within the last 7 days."""
+    text = _read_tail(os.path.join(home_dir, "hook-errors.log"))
+    count = 0
+    for line in (text or "").splitlines():
+        epoch = config.ts_epoch(line.split(" ", 1)[0])
+        if epoch is not None and now - epoch <= RECENT_SECONDS:
+            count += 1
+    return count
 
 
 def _backfill_running(home_dir: str) -> bool:
@@ -168,14 +192,31 @@ def _backfill_running(home_dir: str) -> bool:
         os.close(fd)
 
 
-def _table(header: List[str], rows: List[List[str]]) -> List[str]:
-    grid = [header] + rows
-    widths = [max(len(r[i]) for r in grid) for i in range(len(header))]
-    return ["  " + "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(r)).rstrip() for r in grid]
-
-
 def _pairs(counts: Dict[str, int]) -> List[str]:
     return ["  %s %d" % (k, counts[k]) for k in sorted(counts)] or ["  none"]
+
+
+def _plural(count: int, word: str) -> str:
+    return "%d %s%s" % (count, word, "" if count == 1 else "s")
+
+
+def _when(epoch: Optional[float], now: float) -> str:
+    if epoch is None:
+        return "—"
+    day = datetime.date.fromtimestamp(epoch)
+    today = datetime.date.fromtimestamp(now)
+    clock = time.strftime("%H:%M", time.localtime(epoch))
+    if day == today:
+        return "today " + clock
+    if day == today - datetime.timedelta(days=1):
+        return "yesterday " + clock
+    return day.isoformat()
+
+
+def _md_table(header: List[str], rows: List[List[str]]) -> List[str]:
+    out = ["| " + " | ".join(header) + " |", "|" + "|".join("---" for _ in header) + "|"]
+    out.extend("| " + " | ".join(row) + " |" for row in rows)
+    return out
 
 
 class _Tally(object):
@@ -212,168 +253,207 @@ class _Tally(object):
             if self.newest_hook_any is None or epoch > self.newest_hook_any:
                 self.newest_hook_any = epoch
 
+    def total(self) -> int:
+        return sum(self.sources.values())
 
-def _kind_month_lines(tally: _Tally) -> List[str]:
-    months = sorted(tally.months)
-    rows = [[kind] + [str(tally.by_kind_month[kind].get(m, 0)) for m in months]
-            for kind in sorted(tally.by_kind_month)]
+
+def _kind_table(tally: _Tally) -> List[str]:
+    months = sorted(tally.months)[-MAX_MONTHS:]
+    rows = []
+    for kind, per_month in tally.by_kind_month.items():
+        counts = [per_month.get(m, 0) for m in months]
+        rows.append((-sum(counts), _KIND_LABELS.get(kind, kind), counts))
     if not rows:
-        return ["  none"]
-    return _table(["kind"] + months, rows)
+        return []
+    header = ["kind"] + months + (["total"] if len(months) > 1 else [])
+    body = [[label] + [str(c) for c in counts] + ([str(sum(counts))] if len(months) > 1 else [])
+            for _neg, label, counts in sorted(rows, key=lambda r: (r[0], r[1]))]
+    return _md_table(header, body)
 
 
-def _error_lines(home_dir: str) -> List[str]:
-    last = _read_json(os.path.join(home_dir, "state", "last-error.json"))
-    if last is None:
-        out = ["last hook error: none"]
-    else:
-        out = ["last hook error: %s %s %s" % (last.get("ts", "?"), last.get("event", "?"),
-                                               str(last.get("message", ""))[:_LINE_CAP])]
-    try:
-        size = os.path.getsize(os.path.join(home_dir, "hook-errors.log"))
-    except OSError:
-        size = 0
-    out.append("hook-errors.log: %d bytes" % size)
+class _Profiles(object):
+    """Per-profile rows plus what the verdict, notes and actions need to know about them."""
+
+    def __init__(self):
+        self.rows = []  # type: List[List[str]]
+        self.flags = []  # type: List[str]
+        self.commands = []  # type: List[str]
+        self.shared = set()  # type: set
+        self.stale = False
+
+
+def _profiles(real_home: str, cfg: dict, tally: _Tally, missing: bool, now: float) -> _Profiles:
+    out = _Profiles()
+    dirs = profile_dirs(real_home)
+    by_rule = _newest_transcript_by_rule(dirs, cfg) if cfg.get("profile_rules") else None
+    out.shared = _shared_projects(dirs) if by_rule is None else set()
+    for path in dirs:
+        name = _profile_name(path)
+        enabled = plugin_enabled(os.path.join(path, "settings.json"))
+        live = tally.newest_hook.get(name)
+        transcript = by_rule.get(name) if by_rule is not None else _newest_transcript(path)
+        flag = ""
+        if enabled is True and transcript is not None and (live is None or transcript - live > STALE_SECONDS):
+            if missing:
+                flag = "INTERPRETER MISSING"
+            elif path not in out.shared:
+                flag = "STALE"
+                out.stale = out.stale or by_rule is not None
+        out.flags.append(flag)
+        out.rows.append([_label(name), _ENABLED_CELL[enabled], _when(live, now)])
+        if enabled is not True:
+            prefix = "env -u CLAUDE_CONFIG_DIR" if name == "default" else "CLAUDE_CONFIG_DIR=%s" % path
+            out.commands.append("%s claude plugin %s %s" % (prefix, ENABLE_VERB, PLUGIN_KEY))
     return out
 
 
-def _backfill_lines(home_dir: str) -> List[str]:
-    text = _read_tail(os.path.join(home_dir, "state", "backfill.log"))
-    lines = [l for l in (text or "").splitlines() if l.strip()]
-    out = ["backfill running: %s" % ("yes" if _backfill_running(home_dir) else "no")]
-    if lines:
-        out.append("backfill log last line: %s" % lines[-1][:_LINE_CAP])
-    for line in reversed(lines):
-        if line.startswith("backfill done") or line.startswith("backfill interrupted"):
-            match = _SKIPPED_RE.search(line)
-            if match:
-                out.append("last backfill skipped: %s" % match.group(1))
-            break
-    return out
+def _profile_table(profiles: _Profiles) -> List[str]:
+    header = ["profile", "enabled", "last event"]
+    rows = [list(r) for r in profiles.rows]
+    if any(profiles.flags):
+        header.append("flag")
+        for row, flag in zip(rows, profiles.flags):
+            row.append(flag)
+    return _md_table(header, rows)
 
 
-def _group_lines(home_dir: str, env: Mapping, cfg: dict, tally: _Tally) -> List[str]:
+def _verdict(disabled: bool, tally: _Tally, newest_transcript: Optional[float], attention: bool,
+             now: float) -> str:
+    if disabled:
+        return "⏸ disabled"
+    live = tally.newest_hook_any
+    if live is None or (now - live > RECENT_SECONDS and newest_transcript is not None
+                        and newest_transcript > live):
+        return "❌ not capturing"
+    return "⚠ needs attention" if attention else "✅ capturing"
+
+
+def _group_parts(home_dir: str, env: Mapping, cfg: dict, tally: _Tally) -> Tuple[List[str], List[str], str]:
+    """(current profile and group lines, one line per group, unknown text line or "")."""
     labels = config.read_group_labels(home_dir)
     profile = config.current_profile(env)
     current = config.group_of_profile(profile, cfg, labels)
-    out = ["current profile: %s" % profile, "current group: %s" % (current if current is not None else "no label yet")]
+    head = ["current profile: %s" % profile,
+            "current group: %s" % (current if current is not None else "no label yet")]
     names = set((cfg.get("account_groups") or {}).keys()) | set(labels.values())
     per_group = {}  # type: Dict[str, int]
     unlabelled = 0
     for name, count in tally.by_profile.items():
         group = config.group_of_profile(name, cfg, labels)
         if group is None:
-            # unknown is never labelled; the withheld line below reports it
+            # unknown is never labelled; the withheld line reports it
             if name != "unknown":
                 unlabelled += count
         else:
             per_group[group] = per_group.get(group, 0) + count
     names |= set(per_group)
+    groups = []
     for name in sorted(names):
         members = config.group_profiles(name, cfg, labels)
-        out.append("%s: profiles %s; events %d" % (name, ", ".join(members) or "none", per_group.get(name, 0)))
+        groups.append("%s: profiles %s; events %d" % (name, ", ".join(members) or "none", per_group.get(name, 0)))
     if unlabelled:
-        out.append("no label yet: events %d" % unlabelled)
+        groups.append("no label yet: events %d" % unlabelled)
     unknown_events = tally.by_profile.get("unknown", 0)
+    unknown = ""
     if cfg.get("unknown_group") is not None:
-        out.append("unknown_group: %s" % cfg["unknown_group"])
+        head.append("unknown_group: %s" % cfg["unknown_group"])
     elif unknown_events:
-        out.append("unknown text withheld (%d events with an unknown profile)" % unknown_events)
-    return out
+        unknown = "unknown text withheld (%d events with an unknown profile)" % unknown_events
+    return head, groups, unknown
 
 
-def _session_start_lines(home_dir: str) -> List[str]:
+def _group_note(home_dir: str, env: Mapping, cfg: dict, tally: _Tally) -> Optional[str]:
+    _head, groups, unknown = _group_parts(home_dir, env, cfg, tally)
+    labelled = [g for g in groups if not g.startswith("no label yet:")]
+    if not labelled and not unknown:
+        return None
+    return "ℹ " + " · ".join(labelled + ([unknown] if unknown else []))
+
+
+def _group_detail_lines(home_dir: str, env: Mapping, cfg: dict, tally: _Tally) -> List[str]:
+    head, groups, unknown = _group_parts(home_dir, env, cfg, tally)
+    return head + groups + ([unknown] if unknown else [])
+
+
+def _backfill_note(home_dir: str) -> str:
+    log_path = os.path.join(home_dir, "state", "backfill.log")
+    text = _read_tail(log_path)
+    lines = [l for l in (text or "").splitlines() if l.strip()]
+    if _backfill_running(home_dir):
+        return "backfill: running" + (" — " + lines[-1][:_LINE_CAP] if lines else "")
+    for line in reversed(lines):
+        if line.startswith("backfill done") or line.startswith("backfill interrupted"):
+            match = _KINDS_RE.search(line)
+            total = sum(int(n) for n in re.findall(r"\s(\d+)(?:,|$)", match.group(1))) if match else 0
+            try:
+                stamp = os.stat(log_path).st_mtime
+            except OSError:
+                stamp = time.time()
+            return "backfill: last run %s%s, %s" % (datetime.date.fromtimestamp(stamp).isoformat(),
+                                                    " (interrupted)" if line.startswith("backfill interrupted") else "",
+                                                    _plural(total, "event"))
+    return "backfill: not run yet — /apprentice:backfill"
+
+
+def _last_error_note(home_dir: str) -> Optional[str]:
+    last = _read_json(os.path.join(home_dir, "state", "last-error.json"))
+    if last is None:
+        return None
+    return "last hook error: %s %s %s" % (last.get("ts", "?"), last.get("event", "?"),
+                                           str(last.get("message", ""))[:_LINE_CAP])
+
+
+def _session_start_problem(home_dir: str) -> Tuple[Optional[str], Optional[str]]:
+    """(note, action) when the last SessionStart link result is an error."""
     info = _read_json(os.path.join(home_dir, "state", "last-sessionstart.json"))
-    if info is None:
-        return ["last SessionStart: none"]
-    link = info.get("link")
-    out = ["last SessionStart: ts %s" % info.get("ts", "?"), "  link: %s" % link]
-    if link == "skipped-not-excluded":
-        root = gitinfo.find_git(info["cwd"]) if isinstance(info.get("cwd"), str) else None
-        path = gitinfo.exclude_path(root) if root else None
-        out.append("  exclude_path: %s" % (path or "unknown"))
-        out.append("  add the line %s to that file, then start a new session" % _LOCAL_NAME)
-    out.append("  tone_line: %s" % ("yes" if info.get("tone_line") else "no"))
-    return out
+    link = info.get("link") if info is not None else None
+    if link not in _LINK_PROBLEMS:
+        return None, None
+    if link != "skipped-not-excluded":
+        return "SessionStart link: %s" % link, None
+    root = gitinfo.find_git(info["cwd"]) if isinstance(info.get("cwd"), str) else None
+    path = gitinfo.exclude_path(root) if root else None
+    if path is None:
+        return "SessionStart link: %s (exclude file not found)" % link, None
+    return ("SessionStart link: %s — add the line %s to %s, then start a new session" % (link, _LOCAL_NAME, path),
+            "echo %s >> %s" % (_LOCAL_NAME, path))
 
 
-def _retention_lines(home_dir: str, cfg: dict) -> List[str]:
-    files = events.month_files(home_dir)
-    oldest = os.path.basename(files[0])[:-len(".jsonl")] if files else "none"
+def _cutoff_month(months: int, now: float) -> str:
+    stamp = time.gmtime(now)
+    index = stamp.tm_year * 12 + stamp.tm_mon - 1 - months
+    return "%04d-%02d" % (index // 12, index % 12 + 1)
+
+
+def _retention_note(cfg: dict, tally: _Tally, now: float) -> Optional[str]:
     months = cfg["retention_months"]
     if months <= 0:
-        return ["retention: unlimited, oldest month kept %s" % oldest]
-    now = time.gmtime()
-    index = now.tm_year * 12 + now.tm_mon - 1 - months
-    return ["retention: %d months, cutoff month %04d-%02d, oldest month kept %s"
-            % (months, index // 12, index % 12 + 1, oldest)]
+        return None
+    cutoff = _cutoff_month(months, now)
+    old = sum(count for per_month in tally.by_kind_month.values()
+              for month, count in per_month.items() if month != "unknown" and month < cutoff)
+    if not old:
+        return None
+    return "retention: %s older than %s (retention_months %d)" % (_plural(old, "event"), cutoff, months)
 
 
-def _enablement_lines(home_dir_for_profiles: str, cfg: dict, tally: _Tally, missing: bool) -> List[str]:
-    rows = []
-    commands = []
-    dirs = profile_dirs(home_dir_for_profiles)
-    by_rule = _newest_transcript_by_rule(dirs, cfg) if cfg.get("profile_rules") else None
-    shared = _shared_projects(dirs) if by_rule is None else set()
-    for path in dirs:
-        name = _profile_name(path)
-        enabled = plugin_enabled(os.path.join(path, "settings.json"))
-        live = tally.newest_hook.get(name)
-        transcript = by_rule.get(name) if by_rule is not None else _newest_transcript(path)
-        flags = []
-        if enabled is False:
-            flags.append("NOT ENABLED")
-        elif transcript is not None and (live is None or transcript - live > STALE_SECONDS):
-            if missing:
-                flags.append("INTERPRETER MISSING")
-            elif path not in shared:
-                flags.append("STALE")
-        rows.append([name, {True: "yes", False: "no", None: "unknown"}[enabled],
-                     _iso(live) if live is not None else "-",
-                     _iso(transcript) if transcript is not None else "-", " ".join(flags)])
-        if enabled is not True:
-            prefix = "env -u CLAUDE_CONFIG_DIR" if name == "default" else "CLAUDE_CONFIG_DIR=%s" % path
-            commands.append("%s claude plugin %s %s" % (prefix, ENABLE_VERB, PLUGIN_KEY))
-    if not rows:
-        return ["  no profile directories found"]
-    out = _table(["profile", "enabled", "newest live event", "newest transcript", "flag"], rows)
-    if shared:
-        out.append("transcripts are shared across %d profiles; set profile_rules in config.json "
-                   "to attribute them per profile" % len(shared))
-    if commands:
-        out.append("to enable a profile, run:")
-        out.extend("  " + c for c in commands)
-    return out
-
-
-def report(home: str, env: Mapping, home_dir_for_profiles: Optional[str] = None) -> str:
-    cfg = config.load_config(home)
-    real_home = home_dir_for_profiles if home_dir_for_profiles is not None else os.path.expanduser("~")
-    counters = {}  # type: Dict[str, int]
-    tally = _Tally()
-    for obj in events.iter_events(home, counters=counters):
-        tally.add(obj)
-    out = []  # type: List[str]
-    missing_ts = _interpreter_missing_ts(home)
-    missing = False
-    if missing_ts is not None:
-        missing_epoch = config.ts_epoch(missing_ts)
-        missing = tally.newest_hook_any is None or (missing_epoch is not None
-                                                    and missing_epoch > tally.newest_hook_any)
-    if missing:
-        out.append("interpreter missing since %s (hooks are not running; reinstall the Command Line Tools "
-                   "or set APPRENTICE_PYTHON)" % missing_ts)
-    disabled = env.get("APPRENTICE_DISABLE") == "1" or os.path.exists(os.path.join(home, "disabled"))
-    out.append("disabled: %s" % ("yes" if disabled else "no"))
-    out.append("")
-    out.append("events by kind and month:")
-    out.extend(_kind_month_lines(tally))
-    out.append("events: live %d, backfilled %d, total %d"
-               % (tally.sources["hook"], tally.sources["backfill"], sum(tally.sources.values())))
-    out.append("skipped lines: bad %d, future %d" % (counters.get("bad", 0), counters.get("future", 0)))
-    out.extend(_error_lines(home))
-    out.append("")
-    out.extend(_backfill_lines(home))
+def _details(home_dir: str, env: Mapping, cfg: dict, tally: _Tally, counters: Dict[str, int],
+             now: float) -> List[str]:
+    out = ["events: live %d, backfilled %d, total %d"
+           % (tally.sources["hook"], tally.sources["backfill"], tally.total()),
+           "skipped lines: bad %d, future %d" % (counters.get("bad", 0), counters.get("future", 0))]
+    try:
+        size = os.path.getsize(os.path.join(home_dir, "hook-errors.log"))
+    except OSError:
+        size = 0
+    out.append("hook-errors.log: %d bytes" % size)
+    text = _read_tail(os.path.join(home_dir, "state", "backfill.log"))
+    for line in reversed([l for l in (text or "").splitlines() if l.strip()]):
+        if line.startswith("backfill done") or line.startswith("backfill interrupted"):
+            match = _SKIPPED_RE.search(line)
+            if match:
+                out.append("last backfill skipped: %s" % match.group(1))
+            break
     out.append("")
     out.append("events by profile:")
     out.extend(_pairs(tally.by_profile))
@@ -382,11 +462,80 @@ def report(home: str, env: Mapping, home_dir_for_profiles: Optional[str] = None)
     out.append("entrypoint_unknown: %d" % tally.entrypoint_unknown)
     out.append("")
     out.append("account groups:")
-    out.extend("  " + line for line in _group_lines(home, env, cfg, tally))
+    out.extend("  " + line for line in _group_detail_lines(home_dir, env, cfg, tally))
     out.append("")
-    out.extend(_session_start_lines(home))
-    out.extend(_retention_lines(home, cfg))
-    out.append("")
-    out.append("profile enablement:")
-    out.extend(_enablement_lines(real_home, cfg, tally, missing))
-    return "\n".join(out) + "\n"
+    info = _read_json(os.path.join(home_dir, "state", "last-sessionstart.json"))
+    if info is None:
+        out.append("last SessionStart: none")
+    else:
+        out.append("last SessionStart: ts %s" % info.get("ts", "?"))
+        out.append("  link: %s" % info.get("link"))
+        out.append("  tone_line: %s" % ("yes" if info.get("tone_line") else "no"))
+    files = events.month_files(home_dir)
+    oldest = os.path.basename(files[0])[:-len(".jsonl")] if files else "none"
+    months = cfg["retention_months"]
+    if months <= 0:
+        out.append("retention: unlimited, oldest month kept %s" % oldest)
+    else:
+        out.append("retention: %d months, cutoff month %s, oldest month kept %s"
+                   % (months, _cutoff_month(months, now), oldest))
+    return ["<details><summary>details</summary>", "", "```"] + out + ["```", "", "</details>"]
+
+
+def report(home: str, env: Mapping, home_dir_for_profiles: Optional[str] = None, full: bool = False,
+           now: Optional[float] = None) -> str:
+    now = time.time() if now is None else now
+    cfg = config.load_config(home)
+    real_home = home_dir_for_profiles if home_dir_for_profiles is not None else os.path.expanduser("~")
+    counters = {}  # type: Dict[str, int]
+    tally = _Tally()
+    for obj in events.iter_events(home, counters=counters):
+        tally.add(obj)
+    missing_ts = _interpreter_missing_ts(home)
+    missing = False
+    if missing_ts is not None:
+        missing_epoch = config.ts_epoch(missing_ts)
+        missing = tally.newest_hook_any is None or (missing_epoch is not None
+                                                    and missing_epoch > tally.newest_hook_any)
+    disabled = env.get("APPRENTICE_DISABLE") == "1" or os.path.exists(os.path.join(home, "disabled"))
+    errors = _recent_errors(home, now)
+    profiles = _profiles(real_home, cfg, tally, missing, now)
+    bad = counters.get("bad", 0)
+    attention = bool(errors or profiles.stale or missing or bad)
+    newest_transcript = _newest_transcript_any(profile_dirs(real_home))
+    verdict = _verdict(disabled, tally, newest_transcript, attention, now)
+
+    blocks = ["**apprentice** %s · %s · %s" % (verdict, _plural(tally.total(), "event"), _plural(errors, "error"))]
+    blocks.append("\n".join(_profile_table(profiles)))
+    kinds = _kind_table(tally)
+    if kinds:
+        blocks.append("\n".join(kinds))
+    notes = []  # type: List[Optional[str]]
+    if profiles.shared:
+        notes.append("ℹ transcripts are shared across %d profiles; set profile_rules in config.json "
+                     "to attribute them per profile." % len(profiles.shared))
+    notes.append(_backfill_note(home))
+    notes.append(_group_note(home, env, cfg, tally))
+    notes.append(_last_error_note(home))
+    link_note, link_action = _session_start_problem(home)
+    notes.append(link_note)
+    notes.append(_retention_note(cfg, tally, now))
+    if bad:
+        notes.append("⚠ %s skipped in the event store" % _plural(bad, "unreadable line"))
+    blocks.extend(n for n in notes if n)
+
+    actions = ["`%s`" % c for c in profiles.commands]
+    if missing:
+        actions.append(_PYTHON_REMEDY)
+    if link_action:
+        actions.append("`%s`" % link_action)
+    if disabled:
+        actions.append("`unset APPRENTICE_DISABLE`" if env.get("APPRENTICE_DISABLE") == "1"
+                       else "`rm %s`" % os.path.join(home, "disabled"))
+    if actions:
+        blocks.append("**Actions:**\n\n" + "\n".join("%d. %s" % (i, a) for i, a in enumerate(actions, 1)))
+    else:
+        blocks.append("**Actions:** none")
+    if full:
+        blocks.append("\n".join(_details(home, env, cfg, tally, counters, now)))
+    return "\n\n".join(blocks) + "\n"

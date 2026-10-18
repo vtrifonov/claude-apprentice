@@ -16,8 +16,9 @@ def main(argv) -> int:
             return 2
     parser = argparse.ArgumentParser(prog="status.py",
                                      description="Show apprentice capture, backfill and profile status.")
-    parser.parse_args(argv)
-    sys.stdout.write(status.report(config.home(), os.environ))
+    parser.add_argument("--full", action="store_true", help="add a details block with the full sections")
+    args = parser.parse_args(argv)
+    sys.stdout.write(status.report(config.home(), os.environ, full=args.full))
     return 0
 
 
