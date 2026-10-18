@@ -1,0 +1,69 @@
+#!/usr/bin/python3
+"""Stand-in for `claude -p`, selected by FAKE_CLAUDE_MODE.
+
+valid      envelope whose result is a JSON array with one verdict per pair id found on stdin
+fence      the same, with the result wrapped in a json code fence
+raw        envelope whose result is the text of FAKE_CLAUDE_RESULT
+malformed  prints `{`
+notarray   envelope whose result is a JSON object, not an array
+iserror    exit 0 with is_error true
+limit      exit 1 with the weekly-limit envelope (subtype still says success)
+timeout    sleeps 5 s
+exit1      exits 1 with no output
+
+Every call appends one JSON line {argv, stdin, env} to $FAKE_CLAUDE_DUMP when it is set.
+"""
+import json
+import os
+import sys
+import time
+
+
+def _envelope(result, is_error=False):
+    return {"type": "result", "subtype": "success", "is_error": is_error, "result": result}
+
+
+def _verdicts(stdin):
+    lines = [line for line in stdin.splitlines() if line.strip()]
+    try:
+        pairs = json.loads(lines[-1])
+    except (IndexError, ValueError):
+        return []
+    return [{"id": pair["id"], "is_correction": True, "topic": "use-other-helper",
+             "rule_sketch": "prefer the other helper", "confidence": 0.9}
+            for pair in pairs if isinstance(pair, dict) and "id" in pair]
+
+
+def main():
+    stdin = sys.stdin.read()
+    dump = os.environ.get("FAKE_CLAUDE_DUMP")
+    if dump:
+        with open(dump, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"argv": sys.argv, "stdin": stdin, "env": dict(os.environ)}) + "\n")
+    mode = os.environ.get("FAKE_CLAUDE_MODE", "valid")
+    if mode == "valid":
+        print(json.dumps(_envelope(json.dumps(_verdicts(stdin)))))
+    elif mode == "fence":
+        print(json.dumps(_envelope("```json\n" + json.dumps(_verdicts(stdin)) + "\n```")))
+    elif mode == "raw":
+        print(json.dumps(_envelope(os.environ.get("FAKE_CLAUDE_RESULT", "[]"))))
+    elif mode == "malformed":
+        print("{")
+    elif mode == "notarray":
+        print(json.dumps(_envelope("{}")))
+    elif mode == "iserror":
+        print(json.dumps(_envelope("You have hit your weekly limit", is_error=True)))
+    elif mode == "limit":
+        envelope = _envelope("You have hit your weekly limit. Resets later.", is_error=True)
+        envelope["api_error_status"] = 429
+        print(json.dumps(envelope))
+        sys.exit(1)
+    elif mode == "timeout":
+        time.sleep(5)
+    elif mode == "exit1":
+        sys.exit(1)
+    else:
+        sys.exit(3)
+
+
+main()
