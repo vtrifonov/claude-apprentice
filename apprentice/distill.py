@@ -380,12 +380,43 @@ def _passes(scope: Optional[str], repo: Optional[str], scope_name, repos: List[s
     return (repo is None or repo in repos) and (scope is None or scope_name() == scope)
 
 
-def _dedupe_ids(outcomes: List[list], run: "_Run") -> None:
+def _time_range(items: List[_Item]) -> Tuple[float, float]:
+    stamps = [config.ts_epoch(item.ts) for item in items]
+    stamps = [stamp for stamp in stamps if stamp is not None]
+    return (min(stamps), max(stamps)) if stamps else (0.0, 0.0)
+
+
+def _overlaps(first: Tuple[float, float], second: Tuple[float, float]) -> bool:
+    return first[0] <= second[1] and second[0] <= first[1]
+
+
+def _merge_into(winner: list, loser: list) -> None:
+    """A sequential rewording joins the winner's record: its evidence counts, nothing listed separately."""
+    record, _, private, _, items = winner
+    other_record, _, other_private, _, other_items = loser
+    for event_id in other_record["evidence_ids"]:
+        if event_id not in record["evidence_ids"]:
+            record["evidence_ids"].append(event_id)
+    for key, pick in (("first_seen", min), ("last_seen", max)):
+        stamps = [value for value in (record.get(key), other_record.get(key)) if value]
+        if stamps:
+            record[key] = pick(stamps, key=_ts_key)
+    private["n"] = (private.get("n") or 0) + (other_private.get("n") or 0)
+    private["evidence_ids"] = list(record["evidence_ids"])
+    if private.get("tokens") is not None and other_private.get("tokens") is not None:
+        private["tokens"] = list(private["tokens"]) + list(other_private["tokens"])
+    items.extend(other_items)
+
+
+def _dedupe_ids(outcomes: List[list], run: "_Run") -> List[list]:
     """Keep one record per final id: the candidate under its own id, else the highest stem Jaccard, else the
-    newest. Every other candidate drops the inherited id and keeps its own (co-occurring questions never share)."""
+    newest. A sharer whose events do not overlap the winner's (or an already merged one) is a sequential rewording
+    and merges into the winner, so a hidden rule stays hidden; an overlapping sharer is a concurrent question and
+    drops the inherited id for its own."""
     by_id = {}  # type: Dict[str, List[list]]
     for entry in outcomes:
         by_id.setdefault(entry[0]["id"], []).append(entry)
+    merged = []  # type: List[list]
     for rule_id in sorted(by_id):
         sharing = by_id[rule_id]
         if len(sharing) < 2:
@@ -397,10 +428,18 @@ def _dedupe_ids(outcomes: List[list], run: "_Run") -> None:
                     _ts_key(record["last_seen"]), record["inherited_from"] or "")
 
         sharing.sort(key=rank, reverse=True)
+        taken = [_time_range(sharing[0][4])]
         for entry in sharing[1:]:
+            span = _time_range(entry[4])
+            if not any(_overlaps(span, other) for other in taken):
+                taken.append(span)
+                _merge_into(sharing[0], entry)
+                merged.append(entry)
+                continue
             record = entry[0]
             record["id"], record["inherited_from"] = record["inherited_from"], None
             entry[3] = "proposable"
+    return [entry for entry in outcomes if not any(entry is gone for gone in merged)]
 
 
 def _evidence_ids(items: List[_Item]) -> List[str]:
@@ -631,13 +670,13 @@ def build_pack(home: str, env: Mapping, cfg: dict, since: Optional[str], repo: O
         if not _passes(scope, repo, lambda: record["scope"], record["repos"]):
             private_out[record["id"]] = private
             continue
-        outcomes.append([record, match, private, run.ledger_outcome(record, match, items)])
-    _dedupe_ids(outcomes, run)
+        outcomes.append([record, match, private, run.ledger_outcome(record, match, items), items])
+    outcomes = _dedupe_ids(outcomes, run)
     ids = [entry[0]["id"] for entry in outcomes]
     assert len(ids) == len(set(ids)), "duplicate candidate ids after ledger inheritance"
 
     proposable, weak, covered, missing = [], [], [], []
-    for record, _, private, outcome in outcomes:
+    for record, _, private, outcome, _items in outcomes:
         private_out[record["id"]] = private
         if outcome in ("hidden-rejected", "hidden-snoozed"):
             remaining["hidden_by_ledger"] += 1

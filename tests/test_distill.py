@@ -336,10 +336,12 @@ class PackTest(DistillTestCase):
         pack, _ = self.build(include_all=True, since="2026-01-20")
         self.assertEqual(listed(pack), [])
         self.assertEqual(pack["remaining"]["hidden_by_ledger"], 1)
-        # while the old-stem cluster is in the run it keeps the id; the rewording keeps its own (one record per id)
-        both, _ = self.build(include_all=True)
-        self.assertEqual([cand["id"] for cand in listed(both)], [cluster.ask_rule_id(new_key)])
+        # while the old stem's events are still in the run, the sequential rewording merges into the hidden record
+        both, private = self.build(include_all=True)
+        self.assertEqual(listed(both), [])
         self.assertEqual(both["remaining"]["hidden_by_ledger"], 1)
+        self.assertEqual(private[old_id]["n"], 6)
+        self.assertNotIn(cluster.ask_rule_id(new_key), private)
         # an undone decision still matches but hides nothing, so the inheritance shows on the listed candidate
         ledger.append_proposal(self.home, {"id": old_id, "status": "undone", "decided_at": ts(51), "kind": "ask",
                                            "cluster_key": cluster.key_string(old_key)})
@@ -349,6 +351,26 @@ class PackTest(DistillTestCase):
         self.assertEqual(inherited[0]["id"], old_id)
         self.assertEqual(inherited[0]["inherited_from"], cluster.ask_rule_id(new_key))
         self.assertEqual(inherited[0]["stem"], new_key[2])
+
+    def test_concurrent_reworded_question_keeps_own_id(self):
+        cfg = config.load_config(self.home)
+        aliases = config.effective_tables(cfg)["header_aliases"]
+        old_q = "Use fable model for the release build?"
+        new_q = "Use fable model for the nightly release build?"
+        fable = MODEL_LABELS[0]
+        self.add([ask(day, "o-%d" % day, 10, fable, question=old_q) for day in (0, 8, 16)])
+        self.add([ask(day, "n-%d" % day, 10, fable, question=new_q) for day in (1, 9, 17)])
+        old_key = cluster.cluster_key(None, "Models", old_q, MODEL_LABELS, aliases)
+        new_key = cluster.cluster_key(None, "Models", new_q, MODEL_LABELS, aliases)
+        new_id = cluster.ask_rule_id(new_key)
+        ledger.append_proposal(self.home, {"id": cluster.ask_rule_id(old_key), "status": "rejected",
+                                           "n_at_decision": 3, "decided_at": ts(50), "kind": "ask",
+                                           "cluster_key": cluster.key_string(old_key)})
+        pack, private = self.build(include_all=True)
+        self.assertEqual([cand["id"] for cand in listed(pack)], [new_id])
+        self.assertIsNone(listed(pack)[0]["inherited_from"])
+        self.assertEqual(pack["remaining"]["hidden_by_ledger"], 1)
+        self.assertEqual(private[new_id]["n"], 3)
 
     def test_scope_repo_from_artifact_uses_evidence_main(self):
         trees = worktrees.build(os.path.join(self.home, "trees"))
@@ -570,12 +592,14 @@ class ReviewB7LedgerTest(DistillTestCase):
         self.assertEqual(len(listed(pack)), 2)
         self.assertEqual(by_id[old_id]["inherited_from"], near_id)
         self.assertIsNone(by_id[far_id]["inherited_from"])
-        # an own-id match beats every rewording
+        # an own-id match wins its id: the sequential rewording merges into it, the one concurrent with that
+        # rewording keeps its own id
         self.add([ask(day, "o%d" % day, 10, fable, question=old_q) for day in (0, 8, 16)])
         pack, private = self.build(include_all=True)
         ids = [cand["id"] for cand in listed(pack)]
-        self.assertEqual(sorted(ids), sorted([old_id, near_id, far_id]))
-        self.assertEqual([cand["inherited_from"] for cand in listed(pack)], [None, None, None])
+        self.assertEqual(sorted(ids), sorted([old_id, far_id]))
+        self.assertEqual([cand["inherited_from"] for cand in listed(pack)], [None, None])
+        self.assertEqual(private[old_id]["n"], 6)
         self.assertTrue(set(ids) <= set(private))
 
     def test_assessed_flag_and_not_assessed_line(self):
