@@ -437,6 +437,78 @@ def _retention_note(cfg: dict, tally: _Tally, now: float) -> Optional[str]:
     return "retention: %s older than %s (retention_months %d)" % (_plural(old, "event"), cutoff, months)
 
 
+_PACK_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})-(\d+)\.json$")
+_BAND_ORDER = ("high", "medium", "low")
+
+
+def _newest_pack(home_dir: str) -> Optional[Tuple[str, dict]]:
+    """(file name, pack) of the review pack with the latest day and number; None when there is none."""
+    try:
+        names = os.listdir(os.path.join(home_dir, "review"))
+    except OSError:
+        return None
+    ranked = sorted((m.group(1), int(m.group(2)), n) for n in names for m in [_PACK_RE.match(n)] if m)
+    for _day, _num, name in reversed(ranked):
+        pack = _read_json(os.path.join(home_dir, "review", name))
+        if pack is not None:
+            return name, pack
+    return None
+
+
+def _band_counts(candidates: list, hidden: set) -> str:
+    counts = {}  # type: Dict[str, int]
+    for cand in candidates:
+        if not isinstance(cand, dict) or cand.get("id") in hidden:
+            continue
+        band = cand.get("band") if isinstance(cand.get("band"), str) else "unknown"
+        counts[band] = counts.get(band, 0) + 1
+    order = [b for b in _BAND_ORDER if b in counts] + sorted(b for b in counts if b not in _BAND_ORDER)
+    return ", ".join("%s %d" % (b, counts[b]) for b in order) or "none"
+
+
+def _age_days(epoch: float, now: float) -> str:
+    return _plural(max(0, int((now - epoch) // 86400)), "day") + " old"
+
+
+def _review_rows(home_dir: str, now: float) -> List[List[str]]:
+    """Milestone 2 rows: counts, dates and file names only, never candidate, rule or event text."""
+    from apprentice import ledger
+    rows = []  # type: List[List[str]]
+    proposals = ledger.read_proposals(home_dir)
+    found = _newest_pack(home_dir)
+    if found is None:
+        rows.append(["review pack", "no pack yet"])
+    else:
+        name, pack = found
+        stamp = pack.get("generated_at")
+        day = stamp[:10] if isinstance(stamp, str) else _PACK_RE.match(name).group(1)
+        rows.append(["review pack", "%s (%s)" % (day, name)])
+        hidden = set(rid for rid, state in ledger.current_states(proposals).items()
+                     if ledger.is_hiding(state["decided"].get("status")))
+        cands = pack.get("candidates")
+        rows.append(["pending", _band_counts(cands if isinstance(cands, list) else [], hidden)])
+    counts = ledger.totals(proposals)
+    order = [s for s in ledger.STATUSES if s in counts] + sorted(s for s in counts if s not in ledger.STATUSES)
+    rows.append(["ledger", ", ".join("%s %d" % (s, counts[s]) for s in order) or "none"])
+    profile_dir = os.path.join(home_dir, "profile")
+    try:
+        tones = sorted(n for n in os.listdir(profile_dir) if n.startswith("tone-") and n.endswith(".md"))
+    except OSError:
+        tones = []
+    for name in tones:
+        try:
+            rows.append([name, _age_days(os.stat(os.path.join(profile_dir, name)).st_mtime, now)])
+        except OSError:
+            continue
+    try:
+        cached = sum(1 for n in os.listdir(os.path.join(home_dir, "state", "preclass")) if n.endswith(".json"))
+    except OSError:
+        cached = None
+    cell = "none" if cached is None else "%d %s" % (cached, "entry" if cached == 1 else "entries")
+    rows.append(["preclassify cache", cell])
+    return rows
+
+
 def _details(home_dir: str, env: Mapping, cfg: dict, tally: _Tally, counters: Dict[str, int],
              now: float) -> List[str]:
     out = ["events: live %d, backfilled %d, total %d"
@@ -510,6 +582,7 @@ def report(home: str, env: Mapping, home_dir_for_profiles: Optional[str] = None,
     kinds = _kind_table(tally)
     if kinds:
         blocks.append("\n".join(kinds))
+    blocks.append("\n".join(_md_table(["review", "state"], _review_rows(home, now))))
     notes = []  # type: List[Optional[str]]
     if profiles.shared:
         notes.append("ℹ transcripts are shared across %d profiles; set profile_rules in config.json "
