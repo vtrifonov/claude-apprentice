@@ -31,6 +31,8 @@ _MARK_END = "<!-- apprentice:end -->"
 _MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 _DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _REMAINING_KEYS = ("beyond_cap", "weak", "covered", "hidden_by_ledger", "single_signal", "text_withheld")
+RESCOPED_MISSING = "rescoped-skill-not-found"
+TEMPLATE_WITHHELD = "answered in another account group — answers withheld"
 
 
 def _ts_key(ts) -> Tuple[float, str]:
@@ -204,6 +206,23 @@ def _satisfies(split: dict, row: dict) -> bool:
     return value == split["value"]
 
 
+def _template_norm(text: Optional[str]) -> str:
+    return " ".join((text or "").split()).lower().rstrip("?").strip()
+
+
+def template_phrase(header: Optional[str], stem: Optional[str]) -> Optional[str]:
+    """The built-in SKILL_HINTS phrase the header or the question's stem equals exactly (case and whitespace
+    folded, trailing `?` ignored), else None. A substring hit does not count: only a known generic template may
+    stand in for a question nobody in the current account group has seen."""
+    head, body = _template_norm(header), _template_norm(stem)
+    for phrase, _, _ in config.SKILL_HINTS:
+        for part in phrase.split("|"):
+            norm = _template_norm(part)
+            if norm and norm in (head, body):
+                return part
+    return None
+
+
 def _line_present(target: Optional[str], rule_id: str) -> Optional[bool]:
     if target is None:
         return None
@@ -275,12 +294,13 @@ class _Run(object):
                     visible_cwds.append(item.cwd)
                 if item.repo and item.cwd not in repo_cwds.setdefault(item.repo, []):
                     repo_cwds[item.repo].append(item.cwd)
-        repos = list(found.get("repos") or [])
+        repos = _visible_repos(items)
         out = {"target": None, "target_status": "resolved", "target_git": None, "target_shared_groups": []}
         if scope_name == "skill":
             info = resolver.skill_target(skill_name)
             if info is None:
-                out["target_status"] = "skill-not-found"
+                # like a read-only skill: the rule goes to the global file with the skill named in its lead
+                out.update(target=resolver.global_target()["target"], target_status=RESCOPED_MISSING)
             else:
                 out.update(target=info["target"], target_status=info["target_status"], target_git=info["target_git"])
         elif scope_name == "repo":
@@ -313,11 +333,31 @@ class _Run(object):
             if since is not None:
                 events_after = len({item.event_id for item in items
                                     if (config.ts_epoch(item.ts) or 0.0) > since})
-            line_present = _line_present(record["target"], found[0])
+            # where the rule was written at accept time first (a rescope may have moved it), then today's target
+            for target in (decided.get("target"), record["target"]):
+                if target is not None:
+                    line_present = _line_present(target, found[0])
+                    if line_present:
+                        break
         outcome = audit.ledger_disposition(match, decided, events_after, self.now, line_present)
         record["id"] = match["id"]
         record["inherited_from"] = match.get("inherited_from")
         return outcome
+
+    def inherit_score(self, match: dict, rule_id: str) -> float:
+        """How closely a candidate resembles the decided entry it inherited: stem Jaccard, or the token score."""
+        if match["kind"] != "ask":
+            return audit._correction_score(match, self.index.by_id.get(rule_id, []))
+        own = cluster.content_tokens(match["key"][2])
+        best = 0.0
+        for text in self.index.old_keys.get(rule_id, ()):
+            old = cluster.split_key(text)
+            if old is not None:
+                best = max(best, cluster.jaccard(cluster.content_tokens(old[2]), own))
+        return best
+
+    def scope_of(self, kind: str, found: dict, items: List[_Item]) -> str:
+        return scoping.infer_scope(kind, found, self.cfg, self.skill_names, self.evidence_mains(items))[0]
 
 
 def _ask_items(found: dict) -> List[_Item]:
@@ -328,6 +368,39 @@ def _ask_items(found: dict) -> List[_Item]:
 def _pair_items(group: dict) -> List[_Item]:
     return [_Item(pair["event"].get("id"), pair.get("ts"), pair["event"].get("cwd"), pair.get("repo"),
                   bool(pair.get("visible")), pair.get("profile")) for pair in group.get("pairs") or []]
+
+
+def _visible_repos(items: List[_Item]) -> List[str]:
+    """Repo names from current-group evidence only; another group's repo names never reach the pack."""
+    return sorted({item.repo for item in items if item.visible and item.repo})
+
+
+def _passes(scope: Optional[str], repo: Optional[str], scope_name, repos: List[str]) -> bool:
+    """The --scope / --repo filter; `scope_name` is a callable so unfiltered runs never infer a scope."""
+    return (repo is None or repo in repos) and (scope is None or scope_name() == scope)
+
+
+def _dedupe_ids(outcomes: List[list], run: "_Run") -> None:
+    """Keep one record per final id: the candidate under its own id, else the highest stem Jaccard, else the
+    newest. Every other candidate drops the inherited id and keeps its own (co-occurring questions never share)."""
+    by_id = {}  # type: Dict[str, List[list]]
+    for entry in outcomes:
+        by_id.setdefault(entry[0]["id"], []).append(entry)
+    for rule_id in sorted(by_id):
+        sharing = by_id[rule_id]
+        if len(sharing) < 2:
+            continue
+
+        def rank(entry: list) -> Tuple[int, float, Tuple[float, str], str]:
+            record = entry[0]
+            return (1 if record["inherited_from"] is None else 0, run.inherit_score(entry[1], rule_id),
+                    _ts_key(record["last_seen"]), record["inherited_from"] or "")
+
+        sharing.sort(key=rank, reverse=True)
+        for entry in sharing[1:]:
+            record = entry[0]
+            record["id"], record["inherited_from"] = record["inherited_from"], None
+            entry[3] = "proposable"
 
 
 def _evidence_ids(items: List[_Item]) -> List[str]:
@@ -446,59 +519,83 @@ def build_pack(home: str, env: Mapping, cfg: dict, since: Optional[str], repo: O
     remaining = {key: 0 for key in _REMAINING_KEYS}
     unknown_withheld = False
     built = []  # type: List[Tuple[dict, dict, List[_Item], dict]]
+    # (remaining key, kind, cluster or group, items): counted after the --scope/--repo filters below
+    skipped = []  # type: List[Tuple[str, str, dict, List[_Item]]]
+    # private sidecar entries of every candidate, the fully withheld ones included (they never reach review/)
+    private_out = {}  # type: Dict[str, dict]
 
     for found in clusters:
         items = _ask_items(found)
         path = confidence.two_signal("ask", found["rows"], cluster_links.get(found["id"], []))
         if path is None:
-            remaining["single_signal"] += 1
+            skipped.append(("single_signal", "ask", found, items))
             continue
-        if not found["text_visible"] and not found["skill"]:
-            remaining["text_withheld"] += 1
-            unknown_withheld = unknown_withheld or any(item.profile == "unknown" for item in items)
+        cluster_key = cluster.key_string(found["key"])
+        private = {"tokens": None, "cluster_key": cluster_key, "kind": "ask", "topic": None,
+                   "evidence_ids": _evidence_ids(items), "n": found["n"]}
+        # a cluster nobody in this group has seen shows text only when it IS a built-in generic template
+        template = None if found["text_visible"] else template_phrase(found["header"], found["stem"])
+        if not found["text_visible"] and template is None:
+            skipped.append(("text_withheld", "ask", found, items))
+            private_out[found["id"]] = private
             continue
         split = _split_inputs(found, path)
         band_value, band_inputs = confidence.band(
             found["n"], len(found["sessions"]), len(found["repos"]), confidence.consistency(found, split["split"]),
             cluster.reversal_30d(found, now), bool(found["reversals"]), path, split["split_purity"],
             split["majority_band"])
+        band_inputs["assessed"] = confidence.assessed(found)
         mains = run.evidence_mains(items)
         scope_name, named_skill = scoping.infer_scope("ask", found, cfg, run.skill_names, mains)
         skill_name = found["skill"] or named_skill
         where = run.targets("ask", found, scope_name, skill_name, items, found["text_visible"], mains)
-        summary = _ask_summary(found)
-        quote_ok = scope_name in ("global", "skill") or found["text_visible"]
-        rows_newest = sorted(found["rows"], key=lambda row: (_ts_key(row.get("ts")), row.get("event_id") or ""),
-                             reverse=True)
-        quotes = _quotes([row["free_text"] for row in rows_newest if row.get("visible") and row.get("free_text")])
-        ask_fields = {"cluster_key": cluster.key_string(found["key"]), "header": found["header"],
-                      "stem": found["stem"], "labels": found["labels"],
-                      "display_questions": found["display_questions"], "free_texts": found["free_texts"]}
-        record = _record("ask", found, items, scope_name, skill_name, where, band_value, band_inputs, split,
-                         audit.audit_target(summary, where["target"], quote_ok, run.df, cfg), summary, quotes,
+        if template is not None:
+            # only the template phrase, the count and the withheld note: no header, stem, labels, key or answers
+            summary = "%s · %d · %s" % (template, found["n"], TEMPLATE_WITHHELD)
+            audit_text = audit.audit_target(template, where["target"], True, run.df, cfg)
+            quotes = []  # type: List[str]
+            ask_fields = {"cluster_key": None, "header": None, "stem": None, "labels": [],
+                          "display_questions": [], "free_texts": []}
+            shown_split = _no_split()
+        else:
+            summary = _ask_summary(found)
+            quote_ok = scope_name in ("global", "skill") or found["text_visible"]
+            audit_text = audit.audit_target(summary, where["target"], quote_ok, run.df, cfg)
+            rows_newest = sorted(found["rows"], key=lambda row: (_ts_key(row.get("ts")), row.get("event_id") or ""),
+                                 reverse=True)
+            quotes = _quotes([row["free_text"] for row in rows_newest if row.get("visible") and row.get("free_text")])
+            ask_fields = {"cluster_key": cluster_key, "header": found["header"],
+                          "stem": found["stem"], "labels": found["labels"],
+                          "display_questions": found["display_questions"], "free_texts": found["free_texts"]}
+            shown_split = split
+        record = _record("ask", found, items, scope_name, skill_name, where, band_value, band_inputs, shown_split,
+                         audit_text, summary, quotes,
                          {"events": found["withheld_rows"], "free_text": found["free_text_withheld"]},
                          ask_fields, None, None)
         match = {"id": found["id"], "kind": "ask", "key": found["key"], "first_seen": found["first_seen"],
                  "evidence_ids": record["evidence_ids"]}
-        private = {"tokens": None, "cluster_key": ask_fields["cluster_key"], "kind": "ask", "topic": None,
-                   "evidence_ids": record["evidence_ids"], "n": band_inputs["n"]}
         built.append((record, match, items, private))
 
     for group in groups:
         items = _pair_items(group)
         path = confidence.two_signal("correction", group["pairs"], links.get(group["id"], []))
         if path is None:
-            remaining["single_signal"] += 1
+            skipped.append(("single_signal", "correction", group, items))
             continue
+        # the seed pair goes first: seed_token_set ranks the seed's tokens by how many pairs share them
+        private = {"tokens": [ledger.seed_token_set([set(pair["tokens"]) for pair in group["pairs"]])],
+                   "cluster_key": None, "kind": "correction", "topic": group["topic"],
+                   "evidence_ids": _evidence_ids(items), "n": len(group["pairs"])}
         visible_pairs = [pair for pair in group["pairs"] if pair["visible"]]
         if not visible_pairs:
-            remaining["text_withheld"] += 1
-            unknown_withheld = unknown_withheld or any(item.profile == "unknown" for item in items)
+            skipped.append(("text_withheld", "correction", group, items))
+            private_out[group["id"]] = private
             continue
         split = _no_split()
         band_value, band_inputs = confidence.band(
             len(group["pairs"]), len(group["sessions"]), len(group["repos"]), confidence.consistency(group, None),
             False, False, path, None, None)
+        band_inputs["assessed"] = confidence.assessed(group)
         mains = run.evidence_mains(items)
         scope_name, skill_name = scoping.infer_scope("correction", group, cfg, run.skill_names, mains)
         where = run.targets("correction", group, scope_name, skill_name, items, True, mains)
@@ -521,20 +618,27 @@ def build_pack(home: str, env: Mapping, cfg: dict, since: Optional[str], repo: O
                          {"events": withheld_pairs, "free_text": withheld_pairs}, ask_fields, sketch, group["topic"])
         match = {"id": group["id"], "kind": "correction", "pairs": group["pairs"], "topic": group["topic"],
                  "evidence_ids": record["evidence_ids"]}
-        # the seed pair goes first: seed_token_set ranks the seed's tokens by how many pairs share them
-        private = {"tokens": [ledger.seed_token_set([set(pair["tokens"]) for pair in group["pairs"]])],
-                   "cluster_key": None, "kind": "correction", "topic": group["topic"],
-                   "evidence_ids": record["evidence_ids"], "n": band_inputs["n"]}
         built.append((record, match, items, private))
 
-    proposable, weak, covered, missing = [], [], [], []
-    private_out = {}  # type: Dict[str, dict]
+    for reason, kind, found, items in skipped:
+        if _passes(scope, repo, lambda: run.scope_of(kind, found, items), _visible_repos(items)):
+            remaining[reason] += 1
+            if reason == "text_withheld":
+                unknown_withheld = unknown_withheld or any(item.profile == "unknown" for item in items)
+
+    outcomes = []  # type: List[list]
     for record, match, items, private in built:
-        if scope is not None and record["scope"] != scope:
+        if not _passes(scope, repo, lambda: record["scope"], record["repos"]):
+            private_out[record["id"]] = private
             continue
-        if repo is not None and repo not in record["repos"]:
-            continue
-        outcome = run.ledger_outcome(record, match, items)
+        outcomes.append([record, match, private, run.ledger_outcome(record, match, items)])
+    _dedupe_ids(outcomes, run)
+    ids = [entry[0]["id"] for entry in outcomes]
+    assert len(ids) == len(set(ids)), "duplicate candidate ids after ledger inheritance"
+
+    proposable, weak, covered, missing = [], [], [], []
+    for record, _, private, outcome in outcomes:
+        private_out[record["id"]] = private
         if outcome in ("hidden-rejected", "hidden-snoozed"):
             remaining["hidden_by_ledger"] += 1
             continue
@@ -560,8 +664,6 @@ def build_pack(home: str, env: Mapping, cfg: dict, since: Optional[str], repo: O
     remaining["covered"] = len(covered)
     if unknown_withheld:
         remaining["hint"] = WITHHELD_HINT
-    for record, private in shown + weak + covered + missing:
-        private_out[record["id"]] = private
 
     current_events = sum(1 for event in cleaned if event["text_visible"])
     pack = {
@@ -591,6 +693,36 @@ def _one_line(text) -> str:
     return " ".join(str(text or "").split())
 
 
+def _status_line(cand: dict) -> Optional[str]:
+    """Why a target is unusable or moved, for the statuses that change what Accept does."""
+    status = cand.get("target_status")
+    repo = (cand.get("repos") or ["the repo"])[0]
+    skill = cand.get("skill") or "the skill"
+    if status == "no-checkout":
+        return ("- No checkout of %s found on this machine: Accept records accept_failed (no-checkout); "
+                "rescope to global or skip" % repo)
+    if status == "git-tracked-local":
+        return ("- CLAUDE.local.md is tracked in git in %s, so writing it would commit the rule: "
+                "rescope to global or skip" % repo)
+    if status == "unknown-tracking":
+        return ("- Cannot tell whether CLAUDE.local.md is tracked in git in %s: apply refuses it "
+                "(git-index-unknown); rescope to global or skip" % repo)
+    if status == "rescoped-readonly":
+        return ("- The skill directory of %s is read-only (plugin cache or synced): the rule goes to the global "
+                "file with the skill named in its lead" % skill)
+    if status == RESCOPED_MISSING:
+        return ("- The skill directory of %s was not found on this machine: the rule goes to the global file "
+                "with the skill named in its lead" % skill)
+    return None
+
+
+def _consistency(inputs: dict) -> str:
+    if inputs.get("assessed") is False:
+        return " · consistency: not assessed"
+    value = inputs.get("consistency")
+    return " · consistency: %g" % value if departures._is_number(value) else ""
+
+
 def _block(index: int, cand: dict) -> List[str]:
     inputs = cand.get("band_inputs") or {}
     lines = ["## %d. %s" % (index, _one_line(cand.get("summary")) or "(no summary)"), ""]
@@ -598,14 +730,21 @@ def _block(index: int, cand: dict) -> List[str]:
     lines.append("- id `%s` · %s · recommend %s" % (cand.get("id"), cand.get("kind"), cand.get("recommend")))
     lines.append("- Scope: %s · target: %s · status: %s" % (cand.get("scope"), cand.get("target") or "none",
                                                             cand.get("target_status")))
+    explain = _status_line(cand)
+    if explain:
+        lines.append(explain)
+    if cand.get("kind") == "ask" and not cand.get("skill"):
+        lines.append("- Asking skill unknown: no skill hint matched this picker, so it cannot target a skill")
     if cand.get("scope") == "global" and cand.get("target_shared_groups"):
         lines.append("- Shared with account groups: %s" % ", ".join(cand["target_shared_groups"]))
     git = cand.get("target_git") or {}
-    if cand.get("scope") == "skill" and git.get("tracked"):
+    if cand.get("scope") == "skill" and git.get("public_mirror"):
+        lines.append("- Tracking: public mirror (the skill is listed in public_skills, so the rule would be public)")
+    elif cand.get("scope") == "skill" and git.get("tracked"):
         lines.append("- Tracking: tracked in git (%s, %s)" % (git.get("remote") or "no remote",
                                                              git.get("visibility") or "visibility unknown"))
-    lines.append("- Band: %s · n %s · %s sessions · %s repos · %s to %s" % (
-        cand.get("band"), inputs.get("n"), inputs.get("sessions"), inputs.get("repos"),
+    lines.append("- Band: %s · n %s · %s sessions · %s repos%s · %s to %s" % (
+        cand.get("band"), inputs.get("n"), inputs.get("sessions"), inputs.get("repos"), _consistency(inputs),
         (cand.get("first_seen") or "?")[:10], (cand.get("last_seen") or "?")[:10]))
     if cand.get("departure"):
         lines.append("- Departure: %s" % cand["departure"])

@@ -17,6 +17,10 @@ _META = frozenset(["answer", "visible", "ts", "numbers", "numbers_other", "reset
 _PREFIX_RE = re.compile(r"^([A-Za-z]+)(?:-|$)")
 _RECOMMENDED = "(Recommended)"
 _SYMBOLS = {">=": "≥", "<": "<", "==": "="}
+# Rows of other account groups keep only these: named extractor numbers and `pace` in its fixed vocabulary.
+# Any other `key=value` key or string value is verbatim question text and never becomes a feature or row value.
+NAMED_NUMBERS = frozenset(["used_pct", "per_day_pct", "working_days_left", "lines", "files", "kb"])
+PACE_VALUES = frozenset(["ample", "low", "tight"])
 
 
 def hour_band(h: int) -> str:
@@ -56,13 +60,31 @@ def _weekday(value):
     return str(int(value)) if _is_number(value) else value
 
 
+def safe_numbers(numbers: Optional[dict]) -> dict:
+    """The part of a non-visible row's `numbers` that carries no verbatim text."""
+    out = {}
+    for key, value in (numbers or {}).items():
+        if key in NAMED_NUMBERS and _is_number(value):
+            out[key] = value
+        elif key == "pace" and value in PACE_VALUES:
+            out[key] = value
+    return out
+
+
+def _row_numbers(row: dict) -> dict:
+    numbers = row.get("numbers") or {}
+    return numbers if row.get("visible") else safe_numbers(numbers)
+
+
 def feature_rows(cluster: dict) -> List[dict]:
     answered = [row for row in cluster.get("rows") or [] if _row_answer(row) is not None]
     words = sorted({word for row in answered for word in row.get("risk_words") or []})
     out = []
     for row in answered:
+        visible = bool(row.get("visible"))
+        numbers = _row_numbers(row)
         features = {}
-        for key, value in (row.get("numbers") or {}).items():
+        for key, value in numbers.items():
             if key in _META:
                 continue
             if _is_number(value):
@@ -71,8 +93,9 @@ def feature_rows(cluster: dict) -> List[dict]:
                 features[key] = value
         hour = row.get("hour_local")
         extras = {
-            "repo": row.get("repo"),
-            "ticket_prefix": ticket_prefix(row.get("ticket")),
+            # another group's repo name and ticket prefix are never split features
+            "repo": row.get("repo") if visible else None,
+            "ticket_prefix": ticket_prefix(row.get("ticket")) if visible else None,
             "skill_hint": row.get("skill_hint"),
             "weekday": _weekday(row.get("weekday")),
             "hour_band": hour_band(hour) if _is_number(hour) else None,
@@ -83,13 +106,13 @@ def feature_rows(cluster: dict) -> List[dict]:
             features["risk:" + word] = word in present
         features.update({
             "answer": _row_answer(row),
-            "visible": bool(row.get("visible")),
+            "visible": visible,
             "ts": row.get("ts"),
-            "numbers": row.get("numbers") or {},
+            "numbers": numbers,
             "numbers_other": row.get("numbers_other") or [],
             "reset_at": row.get("reset_at"),
             "risk_words_negated": row.get("risk_words_negated") or [],
-            "ticket": row.get("ticket"),
+            "ticket": row.get("ticket") if visible else None,
             "recommended": _recommended_string(row.get("recommended")),
         })
         out.append(features)
@@ -163,16 +186,18 @@ def find_split(rows: List[dict], is_departure: Callable[[dict], bool]) -> Option
 
 
 def _departure_row(row: dict) -> dict:
-    ticket = row.get("ticket")
-    return {
+    """One departure for the pack; a non-visible row (already reduced by feature_rows) has no repo or ticket."""
+    out = {
         "ts": row.get("ts"),
-        "repo": row.get("repo"),
-        "ticket": ticket if row.get("visible") else ticket_prefix(ticket),
         "numbers": row.get("numbers"),
         "answer": row.get("answer"),
         "reset_at": row.get("reset_at"),
         "risk_words_negated": row.get("risk_words_negated"),
     }
+    if row.get("visible"):
+        out["repo"] = row.get("repo")
+        out["ticket"] = row.get("ticket")
+    return out
 
 
 def analyze(cluster: dict) -> dict:

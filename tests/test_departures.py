@@ -135,11 +135,30 @@ class AnalyzeTest(ApprenticeTestCase):
         rows += [_crow("2030-01-08T04:00:00Z", "b", visible=True, ticket="XX-123"),
                  _crow("2030-01-09T04:00:00Z", "b", visible=False, ticket="XX-456")]
         found = departures.analyze(_cluster(rows))["departure_rows"]
-        self.assertEqual([row["ticket"] for row in found], ["XX-123", "XX"])
+        self.assertEqual(found[0]["ticket"], "XX-123")
         self.assertEqual(set(found[0]), {"ts", "repo", "ticket", "numbers", "answer", "reset_at",
                                          "risk_words_negated"})
         self.assertEqual(found[0]["answer"], "b")
         self.assertEqual(found[0]["repo"], "acme/widgets")
+        # another group's repo and ticket prefix never reach a departure row
+        self.assertEqual(set(found[1]), {"ts", "numbers", "answer", "reset_at", "risk_words_negated"})
+
+    def test_invisible_rows_keep_only_named_numbers(self):
+        rows = [_crow("2030-01-0%dT04:00:00Z" % day, "a", numbers={"used_pct": 10.0, "zorbnum": 1.0})
+                for day in range(1, 5)]
+        rows += [_crow("2030-01-0%dT04:00:00Z" % day, "b", visible=False, repo="zorbrepo/zorbname",
+                       ticket="ZORBTK-1", numbers={"used_pct": 12.0, "zorbkvkey": "zorbkvval", "zorbnum": 9.0,
+                                                   "pace": "zorbpace", "kb": 3.0}) for day in range(5, 8)]
+        rows.append(_crow("2030-01-08T04:00:00Z", "b", visible=False, numbers={"pace": "tight"}))
+        features = departures.feature_rows(_cluster(rows))
+        hidden = features[4]
+        self.assertEqual(hidden["numbers"], {"used_pct": 12.0, "kb": 3.0})
+        for key in ("zorbkvkey", "zorbnum", "pace", "repo", "ticket_prefix"):
+            self.assertNotIn(key, hidden)
+        self.assertEqual(features[7]["pace"], "tight")
+        found = departures.analyze(_cluster(rows))
+        self.assertNotIn("zorb", repr(found).lower())
+        self.assertNotIn("zorb", departures.sentence(found["majority"]).lower())
 
 
 class RecommendedPassTest(ApprenticeTestCase):

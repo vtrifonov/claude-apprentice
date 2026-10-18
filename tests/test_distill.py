@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import stat
@@ -204,7 +205,7 @@ class PackTest(DistillTestCase):
         self.assertTrue(os.path.isfile(sidecar))
         with open(sidecar, encoding="utf-8") as fh:
             stored = json.load(fh)
-        self.assertEqual(sorted(stored), sorted(cand["id"] for cand in listed(pack)))
+        self.assertTrue(set(cand["id"] for cand in listed(pack)) <= set(stored))
         kinds = set()
         for cand in listed(pack):
             entry = stored[cand["id"]]
@@ -331,13 +332,18 @@ class PackTest(DistillTestCase):
         ledger.append_proposal(self.home, {"id": old_id, "status": "rejected", "n_at_decision": 3,
                                            "decided_at": ts(50), "kind": "ask",
                                            "cluster_key": cluster.key_string(old_key)})
-        pack, _ = self.build(include_all=True)
+        # once the old stem's events leave the window, the rewording inherits the rejection and is hidden
+        pack, _ = self.build(include_all=True, since="2026-01-20")
         self.assertEqual(listed(pack), [])
-        self.assertEqual(pack["remaining"]["hidden_by_ledger"], 2)
+        self.assertEqual(pack["remaining"]["hidden_by_ledger"], 1)
+        # while the old-stem cluster is in the run it keeps the id; the rewording keeps its own (one record per id)
+        both, _ = self.build(include_all=True)
+        self.assertEqual([cand["id"] for cand in listed(both)], [cluster.ask_rule_id(new_key)])
+        self.assertEqual(both["remaining"]["hidden_by_ledger"], 1)
         # an undone decision still matches but hides nothing, so the inheritance shows on the listed candidate
         ledger.append_proposal(self.home, {"id": old_id, "status": "undone", "decided_at": ts(51), "kind": "ask",
                                            "cluster_key": cluster.key_string(old_key)})
-        shown, _ = self.build(include_all=True)
+        shown, _ = self.build(include_all=True, since="2026-01-20")
         inherited = [cand for cand in listed(shown) if cand["inherited_from"]]
         self.assertEqual(len(inherited), 1)
         self.assertEqual(inherited[0]["id"], old_id)
@@ -441,6 +447,192 @@ class PackTest(DistillTestCase):
             self.assertIn("removed flag", result.stderr)
 
 
+def written(home, pack, private):
+    paths = distill.write_pack(home, pack, private)
+    text = ""
+    for path in paths:
+        with open(path, encoding="utf-8") as fh:
+            text += fh.read()
+    return text
+
+
+def correction_id(first_event_id):
+    return "r_" + hashlib.sha1(("corr:" + first_event_id).encode()).hexdigest()[:8]
+
+
+class ReviewB7PrivacyTest(DistillTestCase):
+    def other_picker(self, question, days, answers=None):
+        labels = ["Zorblabel (Recommended)", "Full"]
+        records = []
+        for index, day in enumerate(days):
+            picked, used = (answers or [(labels[0], 10.0)] * len(days))[index]
+            records.append(ask_event(header="Zorbhdr", question=question, option_labels=labels,
+                                     answer_labels=[picked], ts=ts(day), session_id="k-%d" % index,
+                                     tool_use_id="tk-%d" % index, skill_hint="oneshot-pipeline",
+                                     numbers={"used_pct": used}, profile=ALICE, repo="zorbrepo/x", cwd=None,
+                                     transcript_path=None, ticket="ZORBTK-1", branch=None))
+        self.add(records)
+
+    def test_other_group_keyval_never_named(self):
+        fable, nofable = MODEL_LABELS
+        self.add([ask(day, "d%d" % day, 10, fable) for day in (0, 3, 6, 9)])
+        self.add([ask(day, "a%d" % day, 10, nofable, profile=ALICE,
+                      numbers={"used_pct": 10.0, "zorbkvkey": "zorbkvval"}) for day in (1, 4, 7)])
+        pack, private = self.build(include_all=True)
+        self.by_summary(pack, "use fable?")
+        self.assertNotIn("zorb", written(self.home, pack, private).lower())
+
+    def test_other_group_repo_and_ticket_never_reach_pack(self):
+        fable, nofable = MODEL_LABELS
+        self.add([ask(day, "d%d" % day, 10, fable, repo="acme/widgets") for day in (0, 3, 6, 9)])
+        self.add([ask(day, "e%d" % day, 10, nofable) for day in (2, 5)])
+        self.add([ask(day, "a%d" % day, 10, nofable, profile=ALICE, repo="zorbrepo/zorbname", ticket="ZORBTK-12",
+                      numbers={"used_pct": 10.0, "zorbkvkey": "zorbkvval"}) for day in (1, 4)])
+        self.add(group("apples bananas cherries", (11, 19), "zc", profile=ALICE, repo="zorbrepo/zorbcorr",
+                       ticket="ZORBCT-3"))
+        self.add(group("apples bananas cherries", (12,), "own", repo="acme/widgets"))
+        pack, private = self.build(include_all=True)
+        self.assertNotIn("zorb", written(self.home, pack, private).lower())
+        models = self.by_summary(pack, "use fable?")
+        self.assertEqual(models["repos"], ["acme/widgets"])
+        self.assertTrue(models["departure_rows"])
+        for row in models["departure_rows"]:
+            self.assertEqual("repo" in row, "ticket" in row)
+        self.assertEqual(self.by_summary(pack, "apples")["repos"], ["acme/widgets"])
+        filtered, _ = self.build(include_all=True, repo="zorbrepo/zorbname")
+        self.assertEqual(listed(filtered), [])
+
+    def test_other_group_non_template_cluster_fully_withheld(self):
+        self.other_picker("Zorbstem release: Quick mode?", (0, 8, 16))
+        pack, private = self.build(include_all=True)
+        text = written(self.home, pack, private)
+        self.assertEqual(listed(pack), [])
+        self.assertEqual(pack["remaining"]["text_withheld"], 1)
+        self.assertNotIn("zorb", text.lower())
+        self.assertTrue(any("zorbhdr" in (entry["cluster_key"] or "").lower() for entry in private.values()))
+
+    def test_other_group_template_cluster_shows_phrase_only(self):
+        labels = ["Zorblabel (Recommended)", "Full"]
+        answers = [(labels[0], 10.0), (labels[0], 12.0), (labels[0], 14.0), (labels[1], 90.0), (labels[1], 95.0)]
+        self.other_picker("Quick mode?", (0, 8, 16, 24, 32), answers)
+        pack, private = self.build(include_all=True)
+        text = written(self.home, pack, private)
+        self.assertNotIn("zorb", text.lower())
+        self.assertEqual(len(listed(pack)), 1)
+        cand = listed(pack)[0]
+        self.assertEqual(cand["summary"], "quick mode? · 5 · answered in another account group — answers withheld")
+        for field in ("header", "stem", "cluster_key", "departure"):
+            self.assertIsNone(cand[field], field)
+        for field in ("labels", "departure_rows", "repos", "quotes", "display_questions", "free_texts"):
+            self.assertEqual(cand[field], [], field)
+        self.assertEqual(cand["text_withheld"]["events"], 5)
+        self.assertIn("quick mode?", text)
+        self.assertTrue(private[cand["id"]]["cluster_key"])
+
+    def test_gitignore_ignores_ruff_cache(self):
+        with open(os.path.join(REPO_ROOT, ".gitignore"), encoding="utf-8") as fh:
+            self.assertIn(".ruff_cache/", fh.read().splitlines())
+
+
+class ReviewB7LedgerTest(DistillTestCase):
+    def test_accepted_rule_present_at_decided_target_is_covered(self):
+        self.add(group("apples bananas cherries", (0, 8, 16), "ac"))
+        first, _ = self.build()
+        cand = self.by_summary(first, "apples")
+        self.assertEqual(cand["scope"], "global")
+        other = os.path.join(self.fake_home, "repo", "CLAUDE.local.md")
+        self.write(other, "<!-- apprentice:start -->\n- **Keep apples sorted** <!-- apprentice:%s 2026-01-20 -->\n"
+                          "<!-- apprentice:end -->\n" % cand["id"])
+        ledger.append_proposal(self.home, {"id": cand["id"], "status": "accepted", "decided_at": ts(20),
+                                           "kind": "correction", "scope": "repo", "target": other})
+        pack, _ = self.build()
+        self.assertEqual([c["id"] for c in pack["covered"]], [cand["id"]])
+        self.assertEqual(pack["missing"], [])
+
+    def test_inherited_ids_are_unique(self):
+        cfg = config.load_config(self.home)
+        aliases = config.effective_tables(cfg)["header_aliases"]
+        fable = MODEL_LABELS[0]
+        old_q = "Use fable model for the release build?"
+        near_q = "Use fable model for the nightly release build?"
+        far_q = "Use fable model for the weekly arm release build?"
+        old_id = cluster.ask_rule_id(cluster.cluster_key(None, "Models", old_q, MODEL_LABELS, aliases))
+        near_id = cluster.ask_rule_id(cluster.cluster_key(None, "Models", near_q, MODEL_LABELS, aliases))
+        far_id = cluster.ask_rule_id(cluster.cluster_key(None, "Models", far_q, MODEL_LABELS, aliases))
+        old_key = cluster.key_string(cluster.cluster_key(None, "Models", old_q, MODEL_LABELS, aliases))
+        ledger.append_proposal(self.home, {"id": old_id, "status": "undone", "decided_at": ts(50), "kind": "ask",
+                                           "cluster_key": old_key})
+        # no old-stem events: the nearer rewording takes the old id although the farther one is newer
+        self.add([ask(day, "n%d" % day, 10, fable, question=near_q) for day in (24, 32, 40)])
+        self.add([ask(day, "m%d" % day, 10, fable, question=far_q) for day in (25, 33, 41)])
+        pack, private = self.build(include_all=True)
+        by_id = {cand["id"]: cand for cand in listed(pack)}
+        self.assertEqual(len(listed(pack)), 2)
+        self.assertEqual(by_id[old_id]["inherited_from"], near_id)
+        self.assertIsNone(by_id[far_id]["inherited_from"])
+        # an own-id match beats every rewording
+        self.add([ask(day, "o%d" % day, 10, fable, question=old_q) for day in (0, 8, 16)])
+        pack, private = self.build(include_all=True)
+        ids = [cand["id"] for cand in listed(pack)]
+        self.assertEqual(sorted(ids), sorted([old_id, near_id, far_id]))
+        self.assertEqual([cand["inherited_from"] for cand in listed(pack)], [None, None, None])
+        self.assertTrue(set(ids) <= set(private))
+
+    def test_assessed_flag_and_not_assessed_line(self):
+        self.add(group("apples bananas cherries", (0, 8, 16), "as"))
+        self.add([ask(day, "q%d" % day, 10, MODEL_LABELS[0]) for day in (1, 9, 17)])
+        pack, _ = self.build(include_all=True)
+        self.assertFalse(self.by_summary(pack, "apples")["band_inputs"]["assessed"])
+        self.assertTrue(self.by_summary(pack, "use fable?")["band_inputs"]["assessed"])
+        md = distill.render_markdown(pack)
+        self.assertEqual(md.count("consistency: not assessed"), 1)
+        self.assertIn("consistency: 1", md)
+
+    def test_missing_skill_dir_rescopes_to_global(self):
+        quick = MODE_LABELS[0]
+        self.add([ask(day, "q%d" % day, 10, quick, option_labels=MODE_LABELS, header="Mode", question="Quick mode?",
+                      skill="oneshot-pipeline") for day in (0, 8, 16)])
+        pack, _ = self.build(include_all=True)
+        cand = self.by_summary(pack, "quick mode?")
+        self.assertEqual(cand["skill"], "oneshot-pipeline")
+        self.assertEqual(cand["target"], os.path.realpath(os.path.join(self.fake_home, ".claude", "CLAUDE.md")))
+        self.assertEqual(cand["target_status"], "rescoped-skill-not-found")
+        self.assertEqual(cand["recommend"], "accept")
+        self.assertIn("skill directory of oneshot-pipeline was not found", distill.render_markdown(pack))
+
+    def test_remaining_counts_follow_scope_and_repo_filters(self):
+        self.add(group("yaks zebras quokkas", (0, 8, 16), "w", profile=ALICE))
+        self.add([corr("no, solo words sorted", 1, "same", ts=ts(1, 10)),
+                  corr("no, solo words sorted", 1, "same", ts=ts(1, 500))])
+        everything, _ = self.build()
+        self.assertEqual((everything["remaining"]["text_withheld"], everything["remaining"]["single_signal"]), (1, 1))
+        for kw in ({"scope": "skill"}, {"repo": "acme/widgets"}):
+            pack, _ = self.build(**kw)
+            self.assertEqual((pack["remaining"]["text_withheld"], pack["remaining"]["single_signal"]), (0, 0), kw)
+
+    def test_sidecar_covers_withheld_beyond_cap_and_hidden(self):
+        withheld = self.add(group("yaks zebras quokkas", (0, 8, 16), "w", profile=ALICE))
+        self.add(group("apples bananas cherries", (1, 9, 17), "a"))
+        self.add(group("dates elderberries figs", (2, 10, 18), "b"))
+        hidden_ids = self.add(group("grapes honeydew kiwis", (3, 11, 19), "c"))
+        hidden_id = correction_id(hidden_ids[0])
+        ledger.append_proposal(self.home, {"id": hidden_id, "status": "rejected", "n_at_decision": 3,
+                                           "decided_at": ts(30), "kind": "correction"})
+        pack, private = self.build(limit=1)
+        self.assertEqual(len(pack["candidates"]), 1)
+        self.assertEqual(pack["remaining"]["beyond_cap"], 1)
+        self.assertEqual(pack["remaining"]["hidden_by_ledger"], 1)
+        self.assertEqual(pack["remaining"]["text_withheld"], 1)
+        self.assertEqual(len(private), 4)
+        self.assertIn(hidden_id, private)
+        self.assertIn(correction_id(withheld[0]), private)
+        for entry in private.values():
+            self.assertTrue(entry["tokens"])
+            self.assertEqual(entry["n"], 3)
+            self.assertIn("cluster_key", entry)
+        self.assertNotIn(correction_id(withheld[0]), written(self.home, pack, private))
+
+
 def _cand(**overrides):
     cand = {
         "id": "r_00000001", "kind": "ask", "scope": "global", "target": "/x/.claude/CLAUDE.md",
@@ -480,3 +672,26 @@ class MarkdownTest(DistillTestCase):
         self.assertIn(distill.WITHHELD_HINT, "\n".join(lines))
         self.assertEqual(sum(1 for line in lines if line.startswith("- Tracking:")), 1)
         self.assertEqual(sum(1 for line in lines if line.startswith("- Shared with account groups:")), 1)
+
+    def test_markdown_explains_status_and_unknown_skill(self):
+        mirror = {"tracked": True, "root": None, "remote": None, "visibility": "public", "public_mirror": True}
+        cands = [
+            _cand(id="r_0000000a", scope="repo", target=None, target_status="no-checkout", repos=["acme/widgets"]),
+            _cand(id="r_0000000b", scope="repo", target=None, target_status="git-tracked-local",
+                  repos=["acme/widgets"]),
+            _cand(id="r_0000000c", scope="repo", target=None, target_status="unknown-tracking",
+                  repos=["acme/widgets"]),
+            _cand(id="r_0000000d", scope="skill", skill="plain-skill", target="/s/plain-skill/SKILL.md",
+                  target_git=mirror),
+            _cand(id="r_0000000e", kind="correction", skill=None),
+        ]
+        pack = {"generated_at": ts(30), "inputs": {}, "candidates": cands, "weak": [], "covered": [], "missing": [],
+                "remaining": {}}
+        md = distill.render_markdown(pack)
+        self.assertIn("- No checkout of acme/widgets found on this machine", md)
+        self.assertIn("- CLAUDE.local.md is tracked in git in acme/widgets", md)
+        self.assertIn("- Cannot tell whether CLAUDE.local.md is tracked in git in acme/widgets", md)
+        self.assertIn("- Tracking: public mirror", md)
+        self.assertNotIn("- Tracking: tracked in git", md)
+        # the three repo asks have a null skill; the skill ask names one and corrections never get the line
+        self.assertEqual(md.count("- Asking skill unknown"), 3)

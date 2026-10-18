@@ -154,12 +154,13 @@ def _evidence_ids(cand: dict) -> Set[str]:
 
 
 def inherit_by_evidence(cand: dict, index: LedgerIndex) -> Optional[str]:
-    """The id of the most recent ledger entry sharing an evidence event with this group."""
+    """The id of the most recent decided ledger entry sharing an evidence event with this group."""
     own = _evidence_ids(cand)
     if not own:
         return None
     for entry in reversed(index.entries):
-        if own & set(entry.get("evidence_ids") or []):
+        # an id that was only shown has no decision to inherit; an older decided id may still share evidence
+        if entry["id"] in index.states and own & set(entry.get("evidence_ids") or []):
             return entry["id"]
     return None
 
@@ -227,5 +228,6 @@ def ledger_disposition(cand: dict, decided: Optional[dict], events_after: int, n
             return "hidden-snoozed"
         return "proposable"
     if status == "accepted":
-        return "covered" if line_present else "missing"
+        # None means the line could not be checked (no target known), which is not evidence it is gone
+        return "missing" if line_present is False else "covered"
     return "proposable"

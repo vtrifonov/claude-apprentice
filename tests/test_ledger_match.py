@@ -180,6 +180,14 @@ class CorrectionMatchTest(ApprenticeTestCase):
         stranger = _group("r_newgrp07", [_pair("e8", ["unrelated", "words"])])
         self.assertIsNone(audit.inherit_by_evidence(stranger, index))
 
+    def test_evidence_inheritance_skips_undecided_entry(self):
+        decided = _entry("r_evidold1", "rejected", _ts(1), evidence_ids=["e5"], kind="correction")
+        shown = _entry("r_evidnew1", "shown", _ts(2), evidence_ids=["e5"], kind="correction")
+        index = audit.LedgerIndex([decided, shown])
+        group = _group("r_newgrp08", [_pair("e5", ["unrelated", "words"])])
+        self.assertEqual(audit.inherit_by_evidence(group, index), "r_evidold1")
+        self.assertEqual(audit.match_candidate(group, index, {}), ("r_evidold1", decided))
+
 
 class DispositionTest(ApprenticeTestCase):
     def test_snooze_expiry_14_days(self):
@@ -200,6 +208,10 @@ class DispositionTest(ApprenticeTestCase):
         entry = _entry("r_accept01", "accepted", _ts(1))
         self.assertEqual(audit.ledger_disposition({"id": "r_accept01"}, entry, 0, _ts(9), False), "missing")
         self.assertEqual(audit.ledger_disposition({"id": "r_accept01"}, entry, 0, _ts(9), True), "covered")
+
+    def test_accepted_unknown_line_is_not_missing(self):
+        entry = _entry("r_accept02", "accepted", _ts(1))
+        self.assertEqual(audit.ledger_disposition({"id": "r_accept02"}, entry, 0, _ts(9), None), "covered")
 
     def test_undone_and_accept_failed_proposable(self):
         for status in ("undone", "accept_failed"):

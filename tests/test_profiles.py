@@ -111,7 +111,11 @@ class ProfilesTest(ApprenticeTestCase):
     def test_work_only_skill_picker_listed_with_empty_quotes_and_withheld_count(self):
         self.configure(WORK)
         pack, text = self.run_as(DEFAULT)
-        cand = self.by_stem(pack, "quick mode?")
+        found = [cand for cand in listed(pack) if (cand["summary"] or "").startswith("quick mode? · ")]
+        self.assertEqual(len(found), 1)
+        cand = found[0]
+        # only the built-in template phrase shows; the key's header, stem and labels stay out
+        self.assertEqual((cand["header"], cand["stem"], cand["labels"], cand["cluster_key"]), (None, None, [], None))
         self.assertEqual(cand["skill"], "oneshot-pipeline")
         self.assertEqual(cand["quotes"], [])
         self.assertEqual(cand["free_texts"], [])
