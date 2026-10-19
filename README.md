@@ -156,7 +156,7 @@ state/                 plugin-root, group-labels.json, backfill.log and lock,
                        pack-private/ (never opened by the model)
 ```
 
-Event fields are in [docs/record-schema.md](docs/record-schema.md), hook input shapes in [docs/hook-payloads.md](docs/hook-payloads.md), open items in [docs/follow-ups.md](docs/follow-ups.md).
+Event fields are in [docs/record-schema.md](docs/record-schema.md), hook input shapes in [docs/hook-payloads.md](docs/hook-payloads.md).
 
 ## Privacy
 
@@ -181,7 +181,22 @@ Hooks and scripts run `${APPRENTICE_PYTHON:-/usr/bin/python3}` with `-I -S`. The
 
 On macOS, `/usr/bin/python3` is a stub until the Command Line Tools are installed. Without them the hooks silently stop, and `/apprentice:status` reports "interpreter missing". Fix it with `xcode-select --install`, or point `APPRENTICE_PYTHON` at a Python 3.9+ interpreter.
 
-Cost, measured on a quiet machine: the user-prompt hook takes a median 68 ms with `/usr/bin/python3` (52 ms of it is interpreter start-up) and 55–64 ms with Homebrew Python, whatever the transcript size. Both capture hooks run async and never block a prompt. Details in [docs/follow-ups.md](docs/follow-ups.md).
+Cost, measured on a quiet machine (user-prompt hook, median of 30 runs after 3 warm-ups):
+
+| Interpreter | Bare start | 2,000-line transcript | 84 MB transcript | Missing transcript |
+|---|---|---|---|---|
+| `/usr/bin/python3` (Command Line Tools) | 52.5 ms | 68.4 ms | 66.8 ms | 68.4 ms |
+| Homebrew `python3` | 37.0 ms | 63.8 ms | 56.2 ms | 54.8 ms |
+
+The hook adds 16–27 ms over interpreter start-up, and transcript size does not matter because only the tail is read. Both capture hooks run async and never block a prompt.
+
+## Known limits
+
+- **Settings-based auth in preclassify.** The preclassify child runs with `--safe-mode`, which probably skips auth that comes from settings (`apiKeyHelper`, an `env` block). If every batch fails with "child failed under --safe-mode", that is the cause. OAuth logins work.
+- **The scrubber misses some sensitive text.** Person names, internal hostnames and lowercase ticket keys pass. List them in `extra_redact_patterns`.
+- **Shared `projects/` directories.** Backfilled transcripts from a `projects/` directory that several profiles share cannot be told apart, so they are `unknown`. Set `unknown_group` to the group they belong to.
+- **Desktop app.** Capture from the Desktop app (`claude-desktop` entrypoint) is enabled but not yet verified live.
+- **Machine prompts in old data.** Builds before the machine-prompt filter stored relayed agent messages and similar text. The read-time filter hides them; they still take space in `events/`.
 
 ## Configuration
 
